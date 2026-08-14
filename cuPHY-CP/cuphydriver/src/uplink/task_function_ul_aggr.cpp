@@ -286,8 +286,15 @@ int task_work_function_ul_aggr_1_pucch_pusch(Worker* worker, void* param, int fi
     if(!oentity->getOrderLaunchedStatus()){
         if(oentity->waitOrderLaunched(1*NS_X_MS))
         {
-            NVLOGE_FMT(TAG, AERIAL_CUPHYDRV_API_EVENT, "{}: waitOrderLaunched returned error for Map {}",__func__,slot_map->getId());
-            goto error_next;
+            // Order kernel missed the 1 ms deadline. Do not EXIT_L1 and do not
+            // wait on GPU events for this slot (would hang). Drop the slot like
+            // waitULCTasksComplete timeout above.
+            NVLOGE_FMT(TAG, AERIAL_CUPHYDRV_API_EVENT, "{}: waitOrderLaunched returned error for Map {}, skip slot",__func__,slot_map->getId());
+            ti.add("Signal Channel End Task");
+            slot_map->addChannelEndTask();
+            slot_map->addSlotEndTask();
+            ti.add("End Task");
+            return 0;
         }
     }
 
@@ -508,13 +515,12 @@ int task_work_function_ul_aggr_1_pucch_pusch(Worker* worker, void* param, int fi
     return 0;
 
     error_next:
-    ////////////////////////////////////////////////////////////////////////
-    ///// Currently we do not support pipeline recovery from CUDA/FH errors
-    ////////////////////////////////////////////////////////////////////////
-    NVLOGF_FMT(TAG, AERIAL_CUPHYDRV_API_EVENT, "{} line {}: pipeline failed, exit", __func__, __LINE__);
-    EXIT_L1(EXIT_FAILURE);
-
+    // Skip this slot and keep L1 running. CUDA exceptions still FATAL via
+    // PHYDRIVER_CATCH_EXCEPTIONS_FATAL_EXIT above.
+    NVLOGE_FMT(TAG, AERIAL_CUPHYDRV_API_EVENT, "{} line {}: pipeline failed, abort slot (no EXIT_L1)", __func__, __LINE__);
     slot_map->abortTasks();
+    slot_map->addChannelEndTask();
+    slot_map->addSlotEndTask();
     NVLOGE_FMT(TAG, AERIAL_CUPHYDRV_API_EVENT, "Task ul_aggr_1_pucch_pusch aborted the tasklist for an error");
     return -1;
 }
