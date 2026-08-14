@@ -2284,6 +2284,53 @@ cuphyStatus_t CUPHYWINAPI cuphyBatchPdschTx(cuphyPdschTxHndl_t pdschTxHndl, cuph
  */
 cuphyStatus_t CUPHYWINAPI cuphySetupPdschTx(cuphyPdschTxHndl_t pdschTxHndl, cuphyPdschDynPrms_t* pDynPrms, cuphyPdschBatchPrmHndl_t const batchPrmHndl);
 
+/**
+ * \brief Return the PdschTx CUgraph template for embedding as a CUDA graph child node (e.g. PUSCH NAI tail).
+ *
+ * Valid after cuphyCreatePdschTx. The graph topology is finalized after a successful cuphySetupPdschTx
+ * while PDSCH_PROC_MODE_GRAPHS is set in the dynamic parameters.
+ *
+ * \param pdschTxHndl - Handle of PdschTx instance
+ *
+ * \return CUDA graph handle for the PdschTx template graph, or NULL on failure / if not available
+ */
+CUgraph CUPHYWINAPI cuphyPdschTxGetGraphTemplate(cuphyPdschTxHndl_t pdschTxHndl);
+
+/**
+ * \brief Refresh CUgraphExec kernel node parameters from the last cuphySetupPdschTx (graph mode only).
+ *
+ * Call after cuphySetupPdschTx when the PdschTx pipeline uses embedded CUDA graphs so that the instantiated
+ * graph exec matches the latest dynamic configuration (e.g. parent PUSCH graph updating a child PdschTx graph).
+ *
+ * \param pdschTxHndl - Handle of PdschTx instance
+ *
+ * \return
+ * ::CUPHY_STATUS_SUCCESS,
+ * ::CUPHY_STATUS_INVALID_ARGUMENT or other error status if the handle is invalid or graph mode is not active
+ */
+cuphyStatus_t CUPHYWINAPI cuphyPdschTxUpdateGraphExecKernelParams(cuphyPdschTxHndl_t pdschTxHndl);
+
+/**
+ * \brief Propagate updated PdschTx graph template params into a parent PUSCH graph's embedded child node.
+ *
+ * Required after cuphyPdschTxUpdateGraphExecKernelParams when PdschTx is embedded via cuGraphAddChildGraphNode:
+ * the parent graph holds a cloned child exec that does not track PdschTx::exec_graph automatically.
+ *
+ * \param pdschTxHndl - Handle of PdschTx instance (graph template must reflect latest cuphySetupPdschTx)
+ * \param parentGraphExec - Executable graph that contains the child node (e.g. PUSCH full-slot graph_exec[2])
+ * \param childNode - Child graph node handle from the non-executable parent graph (e.g. m_naiPdschChildNode)
+ *
+ * \return
+ * ::CUPHY_STATUS_SUCCESS,
+ * ::CUPHY_STATUS_INVALID_ARGUMENT if any handle is NULL or graph mode is inactive,
+ * ::CUPHY_STATUS_INTERNAL_ERROR if cuGraphExecChildGraphNodeSetParams fails
+ *
+ * \sa ::cuphyPdschTxUpdateGraphExecKernelParams, ::cuphyPdschTxGetGraphTemplate
+ */
+cuphyStatus_t CUPHYWINAPI cuphyPdschTxSyncEmbeddedChildInParentGraphExec(cuphyPdschTxHndl_t pdschTxHndl,
+    CUgraphExec parentGraphExec,
+    CUgraphNode childNode);
+
 /******************************************************************/ /**
  * \brief Fallback single-cell output buffer setup for cuPHY PDSCH pipeline for slot processing
  *

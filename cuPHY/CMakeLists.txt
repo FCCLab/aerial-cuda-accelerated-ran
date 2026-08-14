@@ -251,6 +251,7 @@ add_custom_target(cuphy_examples ALL
         cuphy_ex_pucch_rx_pipeline
         cuphy_ex_pusch_rateMatch
         cuphy_ex_pusch_rx_multi_pipe
+        cuphy_ex_nai_bench
         cuphy_ex_nzp_csirs_rx_multi_cell
         cuphy_ex_simplex_decoder
         cuphy_ex_srs_bfw
@@ -272,6 +273,7 @@ install(DIRECTORY examples/bfc DESTINATION examples FILES_MATCHING PATTERN "*" P
 install(DIRECTORY examples/ch_est DESTINATION examples FILES_MATCHING PATTERN "*" PATTERN "CMakeLists.*" EXCLUDE)
 install(DIRECTORY examples/channel_eq DESTINATION examples FILES_MATCHING PATTERN "*" PATTERN "CMakeLists.*" EXCLUDE)
 install(DIRECTORY examples/pusch_rx_multi_pipe DESTINATION examples FILES_MATCHING PATTERN "*" PATTERN "CMakeLists.*" EXCLUDE)
+install(DIRECTORY examples/nai_bench DESTINATION examples FILES_MATCHING PATTERN "*" PATTERN "CMakeLists.*" EXCLUDE)
 install(DIRECTORY examples/error_correction DESTINATION examples FILES_MATCHING PATTERN "*" PATTERN "CMakeLists.*" EXCLUDE)
 install(DIRECTORY examples/ldpc_encode DESTINATION examples FILES_MATCHING PATTERN "*" PATTERN "CMakeLists.*" EXCLUDE)
 install(DIRECTORY examples/pdsch_tx DESTINATION examples FILES_MATCHING PATTERN "*" PATTERN "CMakeLists.*" EXCLUDE)

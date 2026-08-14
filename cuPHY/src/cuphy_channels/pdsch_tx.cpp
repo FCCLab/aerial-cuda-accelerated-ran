@@ -661,6 +661,50 @@ void updateFileNameMultipleCells(cuphyPdschTxHndl_t pdschTxHndl, uint32_t cell_i
     pipeline_ptr->static_params->pDbg[cell_id].pCfgFileName = file_name;
 }
 
+CUgraph CUPHYWINAPI cuphyPdschTxGetGraphTemplate(cuphyPdschTxHndl_t pdschTxHndl)
+{
+    if (pdschTxHndl == nullptr) {
+        return nullptr;
+    }
+    PdschTx* pipeline_ptr = static_cast<PdschTx*>(pdschTxHndl);
+    return pipeline_ptr->cudaGraphTemplateForEmbed();
+}
+
+cuphyStatus_t CUPHYWINAPI cuphyPdschTxUpdateGraphExecKernelParams(cuphyPdschTxHndl_t pdschTxHndl)
+{
+    if (pdschTxHndl == nullptr) {
+        return CUPHY_STATUS_INVALID_ARGUMENT;
+    }
+    PdschTx* pipeline_ptr = static_cast<PdschTx*>(pdschTxHndl);
+    pipeline_ptr->syncGraphExecKernelNodesFromSetup();
+    return CUPHY_STATUS_SUCCESS;
+}
+
+cuphyStatus_t CUPHYWINAPI cuphyPdschTxSyncEmbeddedChildInParentGraphExec(cuphyPdschTxHndl_t pdschTxHndl,
+    CUgraphExec parentGraphExec,
+    CUgraphNode childNode)
+{
+    if (pdschTxHndl == nullptr || parentGraphExec == nullptr || childNode == nullptr) {
+        return CUPHY_STATUS_INVALID_ARGUMENT;
+    }
+    PdschTx* pipeline_ptr = static_cast<PdschTx*>(pdschTxHndl);
+    if (!pipeline_ptr->getGraphMode()) {
+        return CUPHY_STATUS_INVALID_ARGUMENT;
+    }
+    const CUgraph child_template = pipeline_ptr->cudaGraphTemplateForEmbed();
+    if (child_template == nullptr) {
+        return CUPHY_STATUS_INVALID_ARGUMENT;
+    }
+    const CUresult r = cuGraphExecChildGraphNodeSetParams(parentGraphExec, childNode, child_template);
+    if (r != CUDA_SUCCESS) {
+        NVLOGE_FMT(NVLOG_PDSCH, AERIAL_CUPHY_EVENT,
+            "cuphyPdschTxSyncEmbeddedChildInParentGraphExec: cuGraphExecChildGraphNodeSetParams failed ({})",
+            static_cast<int>(r));
+        return CUPHY_STATUS_INTERNAL_ERROR;
+    }
+    return CUPHY_STATUS_SUCCESS;
+}
+
 /* A cuphyPdschTxHndl_t corresponds to a single pipeline */
 cuphyStatus_t CUPHYWINAPI cuphyRunPdschTx(cuphyPdschTxHndl_t pdschTxHndl, uint64_t procModeBmsk)
 {
@@ -944,6 +988,17 @@ bool PdschTx::getGraphMode()
     return graph_mode;
 }
 
+CUgraph PdschTx::cudaGraphTemplateForEmbed() const
+{
+    return m_graph;
+}
+
+void PdschTx::syncGraphExecKernelNodesFromSetup()
+{
+    if (graph_mode) {
+        updateNodeParamsMultipleCells();
+    }
+}
 
 void PdschTx::setProcMode(bool cfg_graph_mode, bool cfg_inter_cell_batching_mode)
 {
@@ -3168,74 +3223,70 @@ void PdschTx::disableCsirsPrepNodesMultipleCells()
 
 void PdschTx::updateNodeParamsMultipleCells()
 {
-    if (dynamic_params->pCellGrpDynPrm[0].nCsiRsPrms == 0) {
-        // No action needed if there are no CSI-RS parameters in this graph launch, as was the case in the last one as nodes are already disabled.
-        // If we we previously had CSI-RS parameters, then all CSI-RS kernel nodes have to be disabled.
-        if (prev_had_CSIRS_params)
-        {
-            CU_CHECK_EXCEPTION(cuGraphNodeSetEnabled(exec_graph, m_csirsPrepNodesMultipleCells[0], 0));
-            CU_CHECK_EXCEPTION(cuGraphNodeSetEnabled(exec_graph, m_csirsPrepNodesMultipleCells[1], 0));
-            CU_CHECK_EXCEPTION(cuGraphNodeSetEnabled(exec_graph, m_csirsPrepNodesMultipleCells[2], 0));
+    // Push per-slot kernel params into exec_graph (standalone launch) and m_graph (parent cuGraphExecChildGraphNodeSetParams).
+    const auto set_enabled = [&](CUgraphNode node, unsigned enabled, bool to_exec) {
+        if (to_exec) {
+            CU_CHECK_EXCEPTION(cuGraphNodeSetEnabled(exec_graph, node, enabled));
+        }
+        // Template nodes: enabled state is propagated via cuGraphExecChildGraphNodeSetParams on the parent embed.
+    };
+    const auto set_kernel = [&](CUgraphNode node, CUDA_KERNEL_NODE_PARAMS* params, bool to_exec) {
+        if (to_exec) {
+            CU_CHECK_EXCEPTION_W_TAG(NVLOG_PDSCH, cuGraphExecKernelNodeSetParams(exec_graph, node, params));
+        } else {
+            CU_CHECK_EXCEPTION_W_TAG(NVLOG_PDSCH, cuGraphKernelNodeSetParams(node, params));
+        }
+    };
+
+    for (int pass = 0; pass < 2; ++pass) {
+        const bool to_exec = (pass == 0);
+
+        if (dynamic_params->pCellGrpDynPrm[0].nCsiRsPrms == 0) {
+            if (prev_had_CSIRS_params) {
+                set_enabled(m_csirsPrepNodesMultipleCells[0], 0, to_exec);
+                set_enabled(m_csirsPrepNodesMultipleCells[1], 0, to_exec);
+                set_enabled(m_csirsPrepNodesMultipleCells[2], 0, to_exec);
+            }
+        } else {
+            if (!prev_had_CSIRS_params) {
+                set_enabled(m_csirsPrepNodesMultipleCells[0], 1, to_exec);
+                set_enabled(m_csirsPrepNodesMultipleCells[1], 1, to_exec);
+                set_enabled(m_csirsPrepNodesMultipleCells[2], 1, to_exec);
+            }
+            set_kernel(m_csirsPrepNodesMultipleCells[0], &(m_csirs_prep_launch_cfg.get()->m_kernelNodeParams[0]), to_exec);
+            set_kernel(m_csirsPrepNodesMultipleCells[1], &(m_csirs_prep_launch_cfg.get()->m_kernelNodeParams[1]), to_exec);
+            set_kernel(m_csirsPrepNodesMultipleCells[2], &(m_csirs_prep_launch_cfg.get()->m_kernelNodeParams[2]), to_exec);
         }
 
-    } else {
-        if (!prev_had_CSIRS_params)
-        {
-            // Only re-enable nodes if they were previously disabled, i.e., if there were no CSI-RS parameters in previous graph update
-            CU_CHECK_EXCEPTION(cuGraphNodeSetEnabled(exec_graph, m_csirsPrepNodesMultipleCells[0], 1));
-            CU_CHECK_EXCEPTION(cuGraphNodeSetEnabled(exec_graph, m_csirsPrepNodesMultipleCells[1], 1));
-            CU_CHECK_EXCEPTION(cuGraphNodeSetEnabled(exec_graph, m_csirsPrepNodesMultipleCells[2], 1));
+        set_kernel(m_prepareCRCEncodeNodeMultipleCells[0], &(m_prepare_crc_encode_launch_cfg.get()->m_kernelNodeParams), to_exec);
+
+        if (!read_TB_CRC) {
+            set_kernel(m_crcEncodeNodesMultipleCells[0], &(m_crc_encode_launch_cfg.get()->m_kernelNodeParams[0]), to_exec);
         }
-        CU_CHECK_EXCEPTION_W_TAG(NVLOG_PDSCH, cuGraphExecKernelNodeSetParams(exec_graph, m_csirsPrepNodesMultipleCells[0], &(m_csirs_prep_launch_cfg.get()->m_kernelNodeParams[0])));
-        CU_CHECK_EXCEPTION_W_TAG(NVLOG_PDSCH, cuGraphExecKernelNodeSetParams(exec_graph, m_csirsPrepNodesMultipleCells[1], &(m_csirs_prep_launch_cfg.get()->m_kernelNodeParams[1])));
-        CU_CHECK_EXCEPTION_W_TAG(NVLOG_PDSCH, cuGraphExecKernelNodeSetParams(exec_graph, m_csirsPrepNodesMultipleCells[2], &(m_csirs_prep_launch_cfg.get()->m_kernelNodeParams[2])));
+        set_kernel(m_crcEncodeNodesMultipleCells[1], &(m_crc_encode_launch_cfg.get()->m_kernelNodeParams[1]), to_exec);
+
+        const int first_unused_ldpc_node = total_LDPC_kernel_configs;
+        for (int LDPC_cfg = 0; LDPC_cfg < first_unused_ldpc_node; ++LDPC_cfg) {
+            if (LDPC_cfg >= prev_first_unused_ldpc_node) {
+                set_enabled(m_ldpcEncodeNodesMultipleCells[LDPC_cfg], 1, to_exec);
+            }
+            set_kernel(m_ldpcEncodeNodesMultipleCells[LDPC_cfg],
+                &(m_ldpc_encode_launch_cfg.get()[LDPC_cfg].m_kernelNodeParams),
+                to_exec);
+        }
+        for (int LDPC_cfg = first_unused_ldpc_node; LDPC_cfg < prev_first_unused_ldpc_node; ++LDPC_cfg) {
+            set_enabled(m_ldpcEncodeNodesMultipleCells[LDPC_cfg], 0, to_exec);
+        }
+
+        set_kernel(m_rmNodesMultipleCells[0], &(m_rate_matching_launch_cfg.get()->m_kernelNodeParams[0]), to_exec);
+
+        if (!aas_mode) {
+            set_kernel(m_dmrsNodeMultipleCells[0], &(m_dmrs_launch_cfg.get()->m_kernelNodeParams), to_exec);
+        }
     }
-    // Update prev_had_CSIRS_params for next graph update
+
     prev_had_CSIRS_params = (dynamic_params->pCellGrpDynPrm[0].nCsiRsPrms != 0);
-
-    // Update CRC nodes
-    CU_CHECK_EXCEPTION_W_TAG(NVLOG_PDSCH, cuGraphExecKernelNodeSetParams(exec_graph, m_prepareCRCEncodeNodeMultipleCells[0], &(m_prepare_crc_encode_launch_cfg.get()->m_kernelNodeParams)));
-
-    if(!read_TB_CRC)
-    {
-        CU_CHECK_EXCEPTION_W_TAG(NVLOG_PDSCH, cuGraphExecKernelNodeSetParams(exec_graph, m_crcEncodeNodesMultipleCells[0], &(m_crc_encode_launch_cfg.get()->m_kernelNodeParams[0])));
-    }
-    {
-        CU_CHECK_EXCEPTION_W_TAG(NVLOG_PDSCH, cuGraphExecKernelNodeSetParams(exec_graph, m_crcEncodeNodesMultipleCells[1], &(m_crc_encode_launch_cfg.get()->m_kernelNodeParams[1])));
-    }
-
-    // Update LDPC nodes
-    // NB: The CUDA graph kernel node updates can fail for CUDA < 11.2 if they involve a change in the kernel function.
-    int first_unused_ldpc_node = total_LDPC_kernel_configs;
-
-    for(int LDPC_cfg = 0; LDPC_cfg < first_unused_ldpc_node; LDPC_cfg++)
-    {
-        // Only re-enable nodes that were previously disabled
-        if (LDPC_cfg >= prev_first_unused_ldpc_node) {
-            CU_CHECK_EXCEPTION(cuGraphNodeSetEnabled(exec_graph, m_ldpcEncodeNodesMultipleCells[LDPC_cfg], 1));
-        }
-	CU_CHECK_EXCEPTION_W_TAG(NVLOG_PDSCH, cuGraphExecKernelNodeSetParams(exec_graph, m_ldpcEncodeNodesMultipleCells[LDPC_cfg], &(m_ldpc_encode_launch_cfg.get()[LDPC_cfg].m_kernelNodeParams)));
-    }
-
-
-    // Update remaining nodes to point to an empty kernel function and minimal launch config or disable them.
-    // Only do that for nodes that were previously enabled, i.e., from within [first_unused_ldpc_node, prev_first_unused_ldpc_node) if non empty.
-    // This assumes that all std::min(per_cell_group_max_TBs, PDSCH_MAX_HET_LDPC_CONFIGS_SUPPORTED) LDPC graph nodes were originally disabled.
-    for(int LDPC_cfg = first_unused_ldpc_node; LDPC_cfg < prev_first_unused_ldpc_node; LDPC_cfg++)
-    {
-        CU_CHECK_EXCEPTION(cuGraphNodeSetEnabled(exec_graph, m_ldpcEncodeNodesMultipleCells[LDPC_cfg], 0));
-    }
-    // Update prev_first_unused_ldpc_node for next graph update
-    prev_first_unused_ldpc_node = first_unused_ldpc_node;
-
-    // Update fused rate matching and modulation mapper node
-    CU_CHECK_EXCEPTION_W_TAG(NVLOG_PDSCH, cuGraphExecKernelNodeSetParams(exec_graph, m_rmNodesMultipleCells[0], &(m_rate_matching_launch_cfg.get()->m_kernelNodeParams[0])));
-
-    if(!aas_mode)
-    {
-        // Update DMRS node
-        CU_CHECK_EXCEPTION_W_TAG(NVLOG_PDSCH, cuGraphExecKernelNodeSetParams(exec_graph, m_dmrsNodeMultipleCells[0], &(m_dmrs_launch_cfg.get()->m_kernelNodeParams)));
-    }
+    prev_first_unused_ldpc_node = total_LDPC_kernel_configs;
 }
 
 //Dependencies helper which assumes nullptr edge data (necessary with CUDA 13)

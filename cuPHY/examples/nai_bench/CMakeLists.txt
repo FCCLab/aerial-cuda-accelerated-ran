@@ -1,0 +1,9 @@
+# NAI latency microbenchmark (copy_rx -> embedded PdschTx -> ni_sub CUDA graph).
+set(SOURCES cuphy_ex_nai_bench.cpp dummy.cu)
+add_executable(cuphy_ex_nai_bench ${SOURCES})
+target_link_libraries(cuphy_ex_nai_bench cuphy_channels cuphy)
+target_include_directories(cuphy_ex_nai_bench PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../common
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/cuphy_channels)
+
+install(FILES CMakeLists.release.txt DESTINATION examples/nai_bench RENAME CMakeLists.txt)

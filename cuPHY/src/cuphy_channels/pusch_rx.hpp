@@ -27,6 +27,7 @@
 #include "ldpc/ldpc_api.hpp"
 #include "cuphy_hdf5.hpp"
 #include "cuphy.hpp"
+#include "mq_sink.hpp"
 #include "tensor_desc.hpp"
 #include "ch_est/IModule.hpp"
 #include "ch_est/ch_est_settings.hpp"
@@ -64,6 +65,8 @@ static constexpr unsigned int BYTES_PER_WORD               = sizeof(uint32_t) / 
 
 struct cuphyPuschRx
 {};
+
+class NaiPdschRecon;
 
 struct condGraphInfo final {
 //#if TRY_COND_GRAPH_NODES
@@ -260,11 +263,36 @@ public:
 
     [[nodiscard]] cuphyStatus_t copyEarlyHarqOutputToCPU(cudaStream_t cuStrm);
     [[nodiscard]] cuphyStatus_t copyOutputToCPU(cudaStream_t cuStrm);
+    /** RX resgrid export (live `pTDataRx` / `m_tRefDataRx`); used after full-slot GPU work. See `enqueueResgridMqExportsAfterFullSlotWork`. */
+    void copyRxToMq(cudaStream_t cuStrm);
+    /** NAI resgrid export (`m_niGridDev` from embedded graph tail); used after full-slot GPU work. See `enqueueResgridMqExportsAfterFullSlotWork`. Throttled NVLOG marks step 4/4 when the MQ enqueue is issued. */
+    void copyNaiToMq(cudaStream_t cuStrm);
+    /** After full-slot graph/kernels on phase1 (caller must order `cuStrm`, e.g. `waitGpuFullSlotDataRxReadyOnStream`): RX then NAI mq. */
+    void enqueueResgridMqExportsAfterFullSlotWork(cudaStream_t cuStrm);
+
+    /** Same RX slot buffer as ``copyRxToMq`` (``pTDataRx`` / ``m_tRefDataRx``). */
+    struct ResgridRxSlotView {
+        const void* dev{nullptr};
+        int    d0{0};
+        int    d1{0};
+        int    d2{0};
+        int    s0{0};
+        int    s1{0};
+        int    s2{0};
+        bool   fp16{false};
+        size_t nbytes{0};
+        int    ul_prb_cfg{0};
+        explicit operator bool() const { return dev != nullptr && nbytes > 0; }
+    };
+    bool resolveResgridRxSlot(int32_t cellIdxMq, ResgridRxSlotView& out) const;
 
     // determine HARQ/CSI part 1/CSI part 2 detection status
     // void detStatus();
 
     void writeDbgBufSynch(cudaStream_t cuStrm);
+
+    /** Order ``targetStream`` after GPU work that fills ``m_tRefDataRx`` (used by ``run`` / ``cuphyWriteDbgBufSynch``). */
+    void waitGpuFullSlotDataRxReadyOnStream(cudaStream_t targetStream);
 
     cuphyStatus_t setup(cuphyPuschDynPrms_t* pDynPrm);
     cuphyStatus_t run(cuphyPuschRunPhase_t runPhase);
@@ -390,6 +418,12 @@ private:
 
     // graph functions
     void createFullSlotGraph(cuphyPuschFullSlotProcMode_t fullSlotProcMode, CUgraph& fullSlotGraph, CUgraphNode& emptyRootNode, condGraphInfo& condInfo);
+    /** Step 1/4 (ctor): NAI MQ embed path — create `NaiPdschRecon`, warmup PdschTx graph template (stderr + NVLOG on success/failure). */
+    void initNaiMqTailForEmbeddedFullSlotGraph(cudaStream_t cuStream);
+    /** Step 2/4 (graph capture): append copy_rx_to_ni, PdschTx child graph, ni_sub after SCH CRC on `schGraph`. */
+    void appendNaiMqTailGraphNodesAfterSchCrc(cuphyPuschFullSlotProcMode_t fullSlotProcMode, CUgraph schGraph);
+    /** Step 3/4 (graph update): per-exec enable/disable and kernel / embedded PdschTx param refresh on `graphExecSch`. */
+    void updateNaiMqTailGraphNodes(bool disableAllNodes, cuphyPuschFullSlotProcMode_t fullSlotProcMode, CUgraphExec graphExecSch);
     void updateFullSlotGraph(bool disableAllNodes, cuphyPuschFullSlotProcMode_t fullSlotProcMode, CUgraphExec graphExec, condGraphInfo& condInfo);
 
     void createEarlyHarqGraph();  // for early-HARQ portion of PUSCH pipeline
@@ -412,6 +446,9 @@ private:
 
     // kernel launch for early-HARQ full slot proc or post-frontloaded DMRS full slot proc
     void fullSlotKernelLaunch();
+
+    /** Shared `cuphy_mq_enqueue_from_device` for one device buffer + UL resgrid slot descriptor. */
+    void enqueueResgridDevToMq(cudaStream_t cuStrm, cuphy_mq_channel ch, const void* dev_payload, const ResgridRxSlotView& slot) const;
 
     // pipeline inputs
     cuphyTensorPrm_t  m_tPrmDataRx;
@@ -462,6 +499,81 @@ private:
     void*             d_pLDPCSoftOut;
 #endif
     OutputParams      m_outputPrms; // CPU and GPU adreasses of output buffers.
+
+    std::unique_ptr<NaiPdschRecon> m_naiRecon;
+    void*                          m_niGridDev{nullptr};
+    size_t                         m_niGridBytes{0};
+
+    /**
+     * NAI tail (RX->NI copy, embedded PdschTx child graph, NI subtract) is appended after SCH CRC inside the
+     * full-slot CUgraph executed on phase1Stream.
+     *
+     * Feasibility / limitations (see plan spike):
+     * - CU_KERNEL_NODE for copy_rx_to_ni_kernel / ni_sub_h_tx_kernel is supported in CUDA device graphs for kernels only.
+     * - Embedding a PdschTx CUgraph uses cuGraphAddChildGraphNode; this path is enabled whenever the NAI MQ export channel
+     *   is on (`cuphy_mq_export_enabled`), independent of `enableDeviceGraphLaunch` (device graph launch remains a separate PUSCH concern).
+     * - PdschTx exec_graph + m_graph template params are refreshed each slot via cuphyPdschTxUpdateGraphExecKernelParams;
+     *   the parent clone is updated with cuphyPdschTxSyncEmbeddedChildInParentGraphExec (cuGraphExecChildGraphNodeSetParams).
+     * - The embedded PdschTx child is a CU_GRAPH_NODE_TYPE_CHILD: cuGraphNodeSetEnabled is unsupported for that type
+     *   (driver returns CUDA_ERROR_INVALID_VALUE). Copy/subtract kernel nodes are toggled normally; when PdschTx is
+     *   logically off, NaiPdschRecon::refreshEmbeddedGraphToWarmupIdle re-applies the warmup synthetic graph params.
+     */
+    bool                           m_naiTailEmbeddedInFullSlotGraph{false};
+    bool                           m_naiGraphTailBuilt{false};
+    uint8_t                        m_naiGraphCopyNodeEnabled[cuphyPuschFullSlotProcMode_t::CUPHY_MAX_PUSCH_FULL_SLOT_PROC_MODES]{255, 255};
+    uint8_t                        m_naiGraphPdschChildEnabled[cuphyPuschFullSlotProcMode_t::CUPHY_MAX_PUSCH_FULL_SLOT_PROC_MODES]{255, 255};
+    uint8_t                        m_naiGraphSubNodeEnabled[cuphyPuschFullSlotProcMode_t::CUPHY_MAX_PUSCH_FULL_SLOT_PROC_MODES]{255, 255};
+    CUgraphNode                    m_naiCopyRxNode[cuphyPuschFullSlotProcMode_t::CUPHY_MAX_PUSCH_FULL_SLOT_PROC_MODES]{};
+    CUgraphNode                    m_naiPdschChildNode[cuphyPuschFullSlotProcMode_t::CUPHY_MAX_PUSCH_FULL_SLOT_PROC_MODES]{};
+    CUgraphNode                    m_naiNiSubNode[cuphyPuschFullSlotProcMode_t::CUPHY_MAX_PUSCH_FULL_SLOT_PROC_MODES]{};
+    CUDA_KERNEL_NODE_PARAMS        m_naiCopyGraphKernelParamsDriver[cuphyPuschFullSlotProcMode_t::CUPHY_MAX_PUSCH_FULL_SLOT_PROC_MODES]{};
+    CUDA_KERNEL_NODE_PARAMS        m_naiSubGraphKernelParamsDriver[cuphyPuschFullSlotProcMode_t::CUPHY_MAX_PUSCH_FULL_SLOT_PROC_MODES]{};
+    void*                          m_naiCopyKernelParamPtrs[cuphyPuschFullSlotProcMode_t::CUPHY_MAX_PUSCH_FULL_SLOT_PROC_MODES][9]{};
+    void*                          m_naiSubKernelParamPtrs[cuphyPuschFullSlotProcMode_t::CUPHY_MAX_PUSCH_FULL_SLOT_PROC_MODES][32]{};
+
+    struct NaiMqGraphHostArgsCopy {
+        const void* rx{};
+        void* ni{};
+        int nf{};
+        int nt{};
+        int n_ant{};
+        int s0{};
+        int s1{};
+        int s2{};
+    };
+    struct NaiMqGraphHostArgsSub {
+        const void* rx{};
+        const void* tx{};
+        void* ni{};
+        const void* h_est{};
+        int nf_grid{};
+        int nt{};
+        int n_ant_rx{};
+        int rx_s0{};
+        int rx_s1{};
+        int rx_s2{};
+        int n_sc_alloc{};
+        int n_layers{};
+        int n_h_pos{};
+        int h_s0{};
+        int h_s1{};
+        int h_s2{};
+        int h_s3{};
+        uint16_t dmrs_port_bmsk{};
+        int prb_start{};
+        int n_prb{};
+        int sym_start{};
+        int n_sym{};
+        int dmrs_sym_bmsk{};
+        int tx_nf{};
+        int tx_nt{};
+        int tx_n_ports{};
+        int tx_s0{};
+        int tx_s1{};
+        int tx_s2{};
+    };
+    NaiMqGraphHostArgsCopy         m_naiMqGraphCopyArgs[cuphyPuschFullSlotProcMode_t::CUPHY_MAX_PUSCH_FULL_SLOT_PROC_MODES]{};
+    NaiMqGraphHostArgsSub          m_naiMqGraphSubArgs[cuphyPuschFullSlotProcMode_t::CUPHY_MAX_PUSCH_FULL_SLOT_PROC_MODES]{};
 
     cuphyTensorInfo2_t tInfoDftBluesteinWorkspaceTime;
     cuphyTensorInfo2_t tInfoDftBluesteinWorkspaceFreq;

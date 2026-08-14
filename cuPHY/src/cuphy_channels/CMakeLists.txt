@@ -15,7 +15,7 @@
 
 include_directories(common)
 find_package(gsl-lite REQUIRED)
-add_library(cuphy_channels STATIC pusch_rx.cpp pdsch_tx.cpp pdcch_tx.cpp pucch_rx.cpp csirs_tx.cpp csirs_rx.cpp prach_rx.cpp ssb_tx.cpp bfw_tx.cpp srs_rx.cpp srs_tx.cpp)
+add_library(cuphy_channels STATIC pusch_rx.cpp pdsch_tx.cpp pdcch_tx.cpp pucch_rx.cpp csirs_tx.cpp csirs_rx.cpp prach_rx.cpp ssb_tx.cpp bfw_tx.cpp srs_rx.cpp srs_tx.cpp mq_sink.cpp nai_pdsch_recon.cpp nai_ni_kernel.cu)
 set_property(TARGET cuphy_channels PROPERTY POSITION_INDEPENDENT_CODE ON)
 
 target_include_directories(cuphy_channels PRIVATE ../../examples/common)
@@ -30,6 +30,9 @@ target_compile_options(cuphy_channels PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:
 target_compile_options(cuphy_channels PRIVATE ${AERIAL_ARCH_TUNE_FLAGS})
 
 target_link_libraries(cuphy_channels PUBLIC cuphy_hdf5 cuphy gsl-lite::gsl-lite ${HDF5_C_LIBRARIES})
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_link_libraries(cuphy_channels PRIVATE rt)
+endif()
 
 install(TARGETS cuphy_channels DESTINATION lib)
 install(FILES pusch_rx.hpp pdsch_tx.hpp pdcch_tx.hpp pucch_rx.hpp csirs_tx.hpp csirs_rx.hpp prach_rx.hpp ssb_tx.hpp bfw_tx.hpp srs_rx.hpp srs_tx.hpp DESTINATION include)

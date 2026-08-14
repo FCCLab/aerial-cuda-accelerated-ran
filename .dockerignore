@@ -21,3 +21,5 @@
 !CMakePresets.json
 !README.md
 !LICENSE.txt
+!docker
+!docker/nai_bench

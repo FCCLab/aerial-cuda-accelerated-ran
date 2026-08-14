@@ -196,6 +196,12 @@ public:
      */
     bool getGraphMode();
 
+    /** Owning encode CUgraph; for cuGraphAddChildGraphNode embedding. */
+    CUgraph cudaGraphTemplateForEmbed() const;
+
+    /** After cuphySetupPdschTx in graph mode: push params into exec_graph kernel nodes. */
+    void syncGraphExecKernelNodesFromSetup();
+
     const cuphyPdschStatPrms_t* static_params;
     const cuphyPdschDynPrms_t*  dynamic_params;
 

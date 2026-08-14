@@ -1,0 +1,48 @@
+# NAI latency microbenchmark — builds cuphy_ex_nai_bench from mounted cuBB source.
+#
+# From oai-nvidia/cuBB/:
+#   docker compose -f docker/nai_bench/docker-compose.yaml build
+#   docker compose -f docker/nai_bench/docker-compose.yaml run --rm nai-bench
+#   docker compose -f docker/nai_bench/docker-compose.yaml run --rm nai-bench -p 106 -a 2 -n 500
+#
+# Fast dev iteration (bind-mount source, rebuild target only in-container):
+#   ./docker/nai_bench/dev_run.sh -p 133 -n 500
+#   ./docker/nai_bench/dev_run.sh --rebuild-channels   # after editing nai_ni_kernel.cu / nai_pdsch_recon.*
+#
+# Optional: set CUDA_ARCHITECTURES if the container has no GPU during build (default 80-real;90-real).
+
+x-nai-bench-common: &nai-bench-common
+  image: cubb-nai-bench:local
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+  environment:
+    NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+    NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
+    cuBB_SDK: /opt/nvidia/cuBB
+
+services:
+  nai-bench:
+    <<: *nai-bench-common
+    build:
+      context: ../..
+      dockerfile: docker/nai_bench/Dockerfile
+      args:
+        CUDA_ARCHITECTURES: ${CUDA_ARCHITECTURES:-80-real;90-real}
+    entrypoint: ["/opt/nvidia/cuBB/cuPHY/build/examples/nai_bench/cuphy_ex_nai_bench"]
+    command: ["-p", "133", "-w", "20", "-n", "200"]
+
+  nai-bench-dev:
+    <<: *nai-bench-common
+    volumes:
+      # Bench driver (cuphy_ex_nai_bench.cpp) — typical edit loop.
+      - ../../cuPHY/examples/nai_bench:/opt/nvidia/cuBB/cuPHY/examples/nai_bench:ro
+      # NAI kernels / PdschTx embed helpers — use --rebuild-channels when these change.
+      - ../../cuPHY/src/cuphy_channels:/opt/nvidia/cuBB/cuPHY/src/cuphy_channels:ro
+      - ./dev_entrypoint.sh:/opt/nvidia/cuBB/docker/nai_bench/dev_entrypoint.sh:ro
+    entrypoint: ["/bin/bash", "/opt/nvidia/cuBB/docker/nai_bench/dev_entrypoint.sh"]
+    command: ["-p", "133", "-w", "20", "-n", "200"]

@@ -19,8 +19,9 @@
 #include <string>
 #include "pusch_rx.hpp"
 #include "pusch_utils.hpp"
-#include "cuphy.hpp"
 #include "cuphy_api.h"
+#include "mq_sink.hpp"
+#include "nai_pdsch_recon.hpp"
 #include "util.hpp"
 #include "utils.cuh"
 #include "convert_tensor.cuh"
@@ -1186,6 +1187,8 @@ PuschRx::PuschRx(cuphyPuschStatPrms_t const* pStatPrms, cudaStream_t cuStream) :
 
 
     createComponents(cuStream, rmFPconfig, descrmOn);
+
+    initNaiMqTailForEmbeddedFullSlotGraph(cuStream);
 
     // create (device) graph for full-slot processing in PUSCH
     createFullSlotGraph(PUSCH_LEGACY_FULL_SLOT_PROC, m_fullSlotGraph, m_emptyFullSlotRootNode, m_fullSlotGraphCondInfo);
@@ -3861,6 +3864,374 @@ CondStage PuschRx::enterConditionalStage2(condGraphInfo&                  condIn
 
 //==================================================================================================
 
+void PuschRx::initNaiMqTailForEmbeddedFullSlotGraph(cudaStream_t cuStream)
+{
+    const bool mq_nai = cuphy_mq_export_enabled(cuphy_mq_channel::nai);
+    m_naiTailEmbeddedInFullSlotGraph = mq_nai;
+    if (!mq_nai) {
+        return;
+    }
+    m_naiRecon = std::make_unique<NaiPdschRecon>();
+    int prio = 0;
+    (void)cudaStreamGetPriority(cuStream, &prio);
+    if (m_naiRecon->ensurePdschTx(m_cuphyCellStatPrmVecCpu.data(), static_cast<uint16_t>(m_cuphyCellStatPrmVecCpu.size()), prio) != CUPHY_STATUS_SUCCESS) {
+        NVLOGE_FMT(NVLOG_PUSCH, AERIAL_CUPHY_EVENT, "NAI MQ: ensurePdschTx failed; embedded graph tail disabled");
+        m_naiTailEmbeddedInFullSlotGraph = false;
+        m_naiRecon.reset();
+        return;
+    }
+    if (!m_naiRecon->warmupGraphTemplateForParentEmbed(cuStream, m_cuphyPuschStatPrms, m_cuphyCellStatPrmVecCpu.data(), static_cast<uint16_t>(m_cuphyCellStatPrmVecCpu.size()))) {
+        NVLOGE_FMT(NVLOG_PUSCH, AERIAL_CUPHY_EVENT, "NAI MQ: warmupGraphTemplateForParentEmbed failed; embedded graph tail disabled");
+        m_naiTailEmbeddedInFullSlotGraph = false;
+        m_naiRecon.reset();
+        return;
+    }
+    static std::atomic<int> s_ok_log{0};
+    if (s_ok_log.fetch_add(1) < 2) {
+        NVLOGC_FMT(NVLOG_PUSCH,
+            "{}: NAI MQ embedded path ready (step 1/4 ctor: PdschTx created + graph template warmed for child embed)",
+            __FUNCTION__);
+    }
+}
+
+void PuschRx::appendNaiMqTailGraphNodesAfterSchCrc(cuphyPuschFullSlotProcMode_t fullSlotProcMode, CUgraph schGraph)
+{
+    // Step 2/4 (graph capture): chain after scheduler CRC on schGraph — RX resgrid -> NI buffer copy,
+    // embedded PdschTx child graph (NAI interference recon), then subtract kernel into NI.
+    // Requires initNaiMqTailForEmbeddedFullSlotGraph() and a valid PdschTx graph template.
+    if (!m_naiTailEmbeddedInFullSlotGraph || !m_naiRecon || !m_naiRecon->pdschHandle()) {
+        return;
+    }
+    const CUgraph pdsch_g = cuphyPdschTxGetGraphTemplate(m_naiRecon->pdschHandle());
+    if (!pdsch_g) {
+        NVLOGE_FMT(NVLOG_PUSCH, AERIAL_CUPHY_EVENT,
+            "{}: cuphyPdschTxGetGraphTemplate returned null (PdschTx graph not built); skipping NAI tail append",
+            __FUNCTION__);
+        return;
+    }
+    const int mi = (fullSlotProcMode == cuphyPuschFullSlotProcMode_t::PUSCH_LEGACY_FULL_SLOT_PROC) ? 0 : 1;
+    CUgraphNode crc_dep = m_crcNodes[fullSlotProcMode][1];
+
+    CUPHY_CHECK(cuphy_nai_graph_template_copy_rx_kernel(&m_naiCopyGraphKernelParamsDriver[mi], m_naiCopyKernelParamPtrs[mi]));
+    NaiMqGraphHostArgsCopy& ca = m_naiMqGraphCopyArgs[mi];
+    void** cp = m_naiCopyKernelParamPtrs[mi];
+    cp[0] = reinterpret_cast<void*>(&ca.rx);
+    cp[1] = reinterpret_cast<void*>(&ca.ni);
+    cp[2] = reinterpret_cast<void*>(&ca.nf);
+    cp[3] = reinterpret_cast<void*>(&ca.nt);
+    cp[4] = reinterpret_cast<void*>(&ca.n_ant);
+    cp[5] = reinterpret_cast<void*>(&ca.s0);
+    cp[6] = reinterpret_cast<void*>(&ca.s1);
+    cp[7] = reinterpret_cast<void*>(&ca.s2);
+    CU_CHECK_EXCEPTION(cuGraphAddKernelNode(&m_naiCopyRxNode[mi], schGraph, &crc_dep, 1, &m_naiCopyGraphKernelParamsDriver[mi]));
+
+    CUgraphNode dep_copy = m_naiCopyRxNode[mi];
+    CU_CHECK_EXCEPTION(cuGraphAddChildGraphNode(&m_naiPdschChildNode[mi], schGraph, &dep_copy, 1, pdsch_g));
+
+    CUPHY_CHECK(cuphy_nai_graph_template_ni_sub_kernel(&m_naiSubGraphKernelParamsDriver[mi], m_naiSubKernelParamPtrs[mi]));
+    NaiMqGraphHostArgsSub& sa = m_naiMqGraphSubArgs[mi];
+    void** sp = m_naiSubKernelParamPtrs[mi];
+    sp[0] = reinterpret_cast<void*>(&sa.rx);
+    sp[1] = reinterpret_cast<void*>(&sa.tx);
+    sp[2] = reinterpret_cast<void*>(&sa.ni);
+    sp[3] = reinterpret_cast<void*>(&sa.h_est);
+    sp[4] = reinterpret_cast<void*>(&sa.nf_grid);
+    sp[5] = reinterpret_cast<void*>(&sa.nt);
+    sp[6] = reinterpret_cast<void*>(&sa.n_ant_rx);
+    sp[7] = reinterpret_cast<void*>(&sa.rx_s0);
+    sp[8] = reinterpret_cast<void*>(&sa.rx_s1);
+    sp[9] = reinterpret_cast<void*>(&sa.rx_s2);
+    sp[10] = reinterpret_cast<void*>(&sa.n_sc_alloc);
+    sp[11] = reinterpret_cast<void*>(&sa.n_layers);
+    sp[12] = reinterpret_cast<void*>(&sa.n_h_pos);
+    sp[13] = reinterpret_cast<void*>(&sa.h_s0);
+    sp[14] = reinterpret_cast<void*>(&sa.h_s1);
+    sp[15] = reinterpret_cast<void*>(&sa.h_s2);
+    sp[16] = reinterpret_cast<void*>(&sa.h_s3);
+    sp[17] = reinterpret_cast<void*>(&sa.dmrs_port_bmsk);
+    sp[18] = reinterpret_cast<void*>(&sa.prb_start);
+    sp[19] = reinterpret_cast<void*>(&sa.n_prb);
+    sp[20] = reinterpret_cast<void*>(&sa.sym_start);
+    sp[21] = reinterpret_cast<void*>(&sa.n_sym);
+    sp[22] = reinterpret_cast<void*>(&sa.dmrs_sym_bmsk);
+    sp[23] = reinterpret_cast<void*>(&sa.tx_nf);
+    sp[24] = reinterpret_cast<void*>(&sa.tx_nt);
+    sp[25] = reinterpret_cast<void*>(&sa.tx_n_ports);
+    sp[26] = reinterpret_cast<void*>(&sa.tx_s0);
+    sp[27] = reinterpret_cast<void*>(&sa.tx_s1);
+    sp[28] = reinterpret_cast<void*>(&sa.tx_s2);
+
+    CUgraphNode dep_pdsch = m_naiPdschChildNode[mi];
+    CU_CHECK_EXCEPTION(cuGraphAddKernelNode(&m_naiNiSubNode[mi], schGraph, &dep_pdsch, 1, &m_naiSubGraphKernelParamsDriver[mi]));
+
+    m_naiGraphTailBuilt = true;
+    static int s_append_ok[2] = {0, 0};
+    if (s_append_ok[mi]++ < 2) {
+        NVLOGC_FMT(NVLOG_PUSCH,
+            "{}: NAI MQ step 2/4 OK — graph tail nodes appended (mode_idx={}, CRC_dep->copy_rx_to_ni->pdsch_child->ni_sub)",
+            __FUNCTION__,
+            mi);
+    }
+}
+
+void PuschRx::updateNaiMqTailGraphNodes(bool disableAllNodes, cuphyPuschFullSlotProcMode_t fullSlotProcMode, CUgraphExec graphExecSch)
+{
+    // Step 3/4 (per-slot / per-graph-exec): enable/disable NAI nodes and refresh kernel / embedded PdschTx params.
+    if (!m_naiGraphTailBuilt || !m_naiTailEmbeddedInFullSlotGraph || !m_naiRecon) {
+        return;
+    }
+    const int mi = (fullSlotProcMode == cuphyPuschFullSlotProcMode_t::PUSCH_LEGACY_FULL_SLOT_PROC) ? 0 : 1;
+
+    auto sync_nai_copy_sub_nodes = [&](unsigned copy_on, unsigned sub_on) {
+        if (m_naiGraphCopyNodeEnabled[mi] != copy_on) {
+            m_naiGraphCopyNodeEnabled[mi] = static_cast<uint8_t>(copy_on);
+            CU_CHECK_EXCEPTION(cuGraphNodeSetEnabled(graphExecSch, m_naiCopyRxNode[mi], copy_on));
+        }
+        if (m_naiGraphSubNodeEnabled[mi] != sub_on) {
+            m_naiGraphSubNodeEnabled[mi] = static_cast<uint8_t>(sub_on);
+            CU_CHECK_EXCEPTION(cuGraphNodeSetEnabled(graphExecSch, m_naiNiSubNode[mi], sub_on));
+        }
+    };
+
+    auto set_nai_pdsch_embed_active_logical = [&](unsigned pdsch_on) {
+        if (m_naiGraphPdschChildEnabled[mi] != pdsch_on) {
+            m_naiGraphPdschChildEnabled[mi] = static_cast<uint8_t>(pdsch_on);
+        }
+    };
+
+    // cuGraphNodeSetEnabled supports only kernel/memcpy/memset nodes, not child graph nodes (driver returns
+    // CUDA_ERROR_INVALID_VALUE for m_naiPdschChildNode). When PdschTx should be logically off, re-point the
+    // embedded graph exec to the warmup synthetic UE so the child still runs safely.
+    auto sync_embedded_pdsch_child_in_parent = [&]() {
+        const cuphyStatus_t child_st = cuphyPdschTxSyncEmbeddedChildInParentGraphExec(
+            m_naiRecon->pdschHandle(), graphExecSch, m_naiPdschChildNode[mi]);
+        if (child_st != CUPHY_STATUS_SUCCESS) {
+            static std::atomic<int> s_child_sync_fail{0};
+            if (s_child_sync_fail.fetch_add(1) < 16) {
+                NVLOGW_FMT(NVLOG_PUSCH,
+                    "{}: cuphyPdschTxSyncEmbeddedChildInParentGraphExec failed ({}) — embedded PdschTx may still use stale warmup params",
+                    __FUNCTION__,
+                    static_cast<int>(child_st));
+            }
+        }
+    };
+
+    auto apply_nai_tail_enable_state = [&](unsigned copy_on, unsigned pdsch_on, unsigned sub_on) {
+        if (pdsch_on == 0) {
+            // phase1Stream is assigned in cuphySetupPuschRx, not in the ctor — skip idle refresh until then.
+            if (phase1Stream) {
+                const cuphyStatus_t idle_st = m_naiRecon->refreshEmbeddedGraphToWarmupIdle(phase1Stream);
+                if (idle_st != CUPHY_STATUS_SUCCESS) {
+                    static std::atomic<int> s_idle_fail{0};
+                    if (s_idle_fail.fetch_add(1) < 8) {
+                        NVLOGW_FMT(NVLOG_PUSCH,
+                            "{}: refreshEmbeddedGraphToWarmupIdle failed ({}) while disabling NAI Pdsch embed",
+                            __FUNCTION__,
+                            static_cast<int>(idle_st));
+                    }
+                }
+            }
+        }
+        sync_embedded_pdsch_child_in_parent();
+        set_nai_pdsch_embed_active_logical(pdsch_on);
+        sync_nai_copy_sub_nodes(copy_on, sub_on);
+    };
+
+    if (disableAllNodes || !m_cudaGraphModeEnabled) {
+        apply_nai_tail_enable_state(0, 0, 0);
+        static std::atomic<int> s_dis_log{0};
+        if (disableAllNodes && s_dis_log.fetch_add(1) < 4) {
+            NVLOGC_FMT(NVLOG_PUSCH, "{}: NAI MQ step 3/4 — all NAI tail nodes disabled for this graph update", __FUNCTION__);
+        }
+        return;
+    }
+
+    constexpr int32_t cellIdxMq = 0;
+    ResgridRxSlotView slot {};
+    if (!resolveResgridRxSlot(cellIdxMq, slot)) {
+        apply_nai_tail_enable_state(0, 0, 0);
+        static std::atomic<int> s_res_fail{0};
+        if (s_res_fail.fetch_add(1) < 8) {
+            NVLOGW_FMT(NVLOG_PUSCH, "{}: NAI MQ step 3/4 — resolveResgridRxSlot failed; NAI nodes disabled", __FUNCTION__);
+        }
+        return;
+    }
+
+    if (!m_niGridDev || m_niGridBytes < slot.nbytes) {
+        if (m_niGridDev) {
+            (void)cudaFree(m_niGridDev);
+            m_niGridDev = nullptr;
+            m_niGridBytes = 0;
+        }
+        if (cudaMalloc(&m_niGridDev, slot.nbytes) != cudaSuccess) {
+            apply_nai_tail_enable_state(0, 0, 0);
+            NVLOGE_FMT(NVLOG_PUSCH, AERIAL_CUPHY_EVENT, "{}: NAI MQ step 3/4 — cudaMalloc(m_niGridDev) failed; NAI nodes disabled", __FUNCTION__);
+            return;
+        }
+        m_niGridBytes = slot.nbytes;
+    }
+
+    uint32_t ueGrpIdx = 0;
+    bool haveUeGrp = false;
+    for (uint32_t ug = 0; ug < m_cuphyPuschCellGrpDynPrm.nUeGrps; ++ug) {
+        const cuphyPuschUeGrpPrm_t& ugp = m_cuphyPuschCellGrpDynPrm.pUeGrpPrms[ug];
+        if (ugp.nPrb > 0 && ugp.nUes > 0) {
+            ueGrpIdx = ug;
+            haveUeGrp = true;
+            break;
+        }
+    }
+
+    const bool want_recon = slot.fp16 && haveUeGrp && m_outputPrms.pTbPayloadsDevice && m_nSchUes > 0;
+    const bool dft_s = haveUeGrp && (m_cuphyPuschCellGrpDynPrm.pUePrms[m_cuphyPuschCellGrpDynPrm.pUeGrpPrms[ueGrpIdx].pUePrmIdxs[0]].enableTfPrcd != 0);
+    const bool recon_ok = want_recon && !dft_s;
+
+    NaiMqGraphHostArgsCopy& ca = m_naiMqGraphCopyArgs[mi];
+    ca.rx = slot.dev;
+    ca.ni = m_niGridDev;
+    ca.nf = slot.d0;
+    ca.nt = slot.d1;
+    ca.n_ant = slot.d2;
+    int rs0 = slot.s0;
+    int rs1 = slot.s1;
+    int rs2 = slot.s2;
+    if (rs0 == 0 && rs1 == 0 && rs2 == 0) {
+        rs0 = 1;
+        rs1 = slot.d0;
+        rs2 = slot.d0 * slot.d1;
+    }
+    ca.s0 = rs0;
+    ca.s1 = rs1;
+    ca.s2 = rs2;
+
+    m_naiCopyGraphKernelParamsDriver[mi].gridDimX = static_cast<unsigned>((static_cast<unsigned>(slot.d0) + 255u) / 256u);
+    m_naiCopyGraphKernelParamsDriver[mi].gridDimY = static_cast<unsigned>(slot.d1);
+    m_naiCopyGraphKernelParamsDriver[mi].gridDimZ = static_cast<unsigned>(slot.d2);
+    CU_CHECK_EXCEPTION(cuGraphExecKernelNodeSetParams(graphExecSch, m_naiCopyRxNode[mi], &m_naiCopyGraphKernelParamsDriver[mi]));
+
+    if (!recon_ok) {
+        apply_nai_tail_enable_state(1, 0, 0);
+        static std::atomic<int> s_copy_only{0};
+        if (s_copy_only.fetch_add(1) < 16) {
+            NVLOGC_FMT(NVLOG_PUSCH,
+                "{}: NAI MQ step 3/4 OK — copy-RX-to-NI only (recon_ok=0: fp16={} haveUeGrp={} tbDev={} nSchUes={} dft_s={})",
+                __FUNCTION__,
+                static_cast<int>(slot.fp16),
+                static_cast<int>(haveUeGrp),
+                m_outputPrms.pTbPayloadsDevice ? 1 : 0,
+                static_cast<int>(m_nSchUes),
+                static_cast<int>(dft_s));
+        }
+        return;
+    }
+
+    const cuphyPuschRxUeGrpPrms_t& drvdUeGrp = m_drvdUeGrpPrmsCpu[ueGrpIdx];
+    NaiPuschSlotInput naiIn {};
+    naiIn.stream = phase1Stream;
+    naiIn.cell_grp = &m_cuphyPuschCellGrpDynPrm;
+    naiIn.dyn = &m_cuphyPuschDynPrms;
+    naiIn.cell_stats = m_cuphyCellStatPrmVecCpu.data();
+    naiIn.n_cell_stats = static_cast<uint16_t>(m_cuphyCellStatPrmVecCpu.size());
+    naiIn.tb_payloads_dev = m_outputPrms.pTbPayloadsDevice;
+    naiIn.tb_crcs_dev = m_outputPrms.pTbCrcsDevice;
+    naiIn.tb_payload_offsets = m_cuphyPuschDynPrms.pDataOut ? m_cuphyPuschDynPrms.pDataOut->pStartOffsetsTbPayload : nullptr;
+    naiIn.rx_dev = m_niGridDev;
+    naiIn.rx_nf = slot.d0;
+    naiIn.rx_nt = slot.d1;
+    naiIn.rx_n_ant = slot.d2;
+    naiIn.rx_stride0 = slot.s0;
+    naiIn.rx_stride1 = slot.s1;
+    naiIn.rx_stride2 = slot.s2;
+    naiIn.rx_fp16 = slot.fp16;
+    naiIn.h_est_dev = m_tRefHEstVec[ueGrpIdx].addr();
+    naiIn.h_stride0 = drvdUeGrp.tInfoHEst.strides[0];
+    naiIn.h_stride1 = drvdUeGrp.tInfoHEst.strides[1];
+    naiIn.h_stride2 = drvdUeGrp.tInfoHEst.strides[2];
+    naiIn.h_stride3 = drvdUeGrp.tInfoHEst.strides[3];
+    naiIn.n_rx = static_cast<int>(drvdUeGrp.nRxAnt);
+    naiIn.n_layers = static_cast<int>(drvdUeGrp.nLayers);
+    naiIn.n_sc_alloc = static_cast<int>(CUPHY_N_TONES_PER_PRB * drvdUeGrp.nPrb);
+    naiIn.n_h_dmrs_pos = static_cast<int>(drvdUeGrp.dmrsAddlnPos + 1);
+    naiIn.drvd_ue_grp = &drvdUeGrp;
+    const uint16_t ueIdx = m_cuphyPuschCellGrpDynPrm.pUeGrpPrms[ueGrpIdx].pUePrmIdxs[0];
+    naiIn.dmrs_port_bmsk = m_cuphyPuschCellGrpDynPrm.pUePrms[ueIdx].dmrsPortBmsk;
+
+    if (m_naiRecon->prepareEmbeddedGraphSlot(naiIn, m_niGridDev, phase1Stream) != CUPHY_STATUS_SUCCESS) {
+        apply_nai_tail_enable_state(1, 0, 0);
+        static std::atomic<int> s_prep_fail{0};
+        if (s_prep_fail.fetch_add(1) < 16) {
+            NVLOGW_FMT(NVLOG_PUSCH,
+                "{}: NAI MQ step 3/4 — prepareEmbeddedGraphSlot failed; falling back to copy-only for this slot",
+                __FUNCTION__);
+        }
+        return;
+    }
+
+    NaiMqGraphHostArgsSub& sa = m_naiMqGraphSubArgs[mi];
+    const cuphyPuschUeGrpPrm_t& ug = m_cuphyPuschCellGrpDynPrm.pUeGrpPrms[ueGrpIdx];
+    const cuphyPuschUePrm_t& ue = m_cuphyPuschCellGrpDynPrm.pUePrms[ueIdx];
+    sa.rx = m_niGridDev;
+    sa.tx = m_naiRecon->txGridDev();
+    sa.ni = m_niGridDev;
+    sa.h_est = m_tRefHEstVec[ueGrpIdx].addr();
+    sa.nf_grid = slot.d0;
+    sa.nt = slot.d1;
+    sa.n_ant_rx = slot.d2;
+    sa.rx_s0 = rs0;
+    sa.rx_s1 = rs1;
+    sa.rx_s2 = rs2;
+    sa.n_sc_alloc = static_cast<int>(CUPHY_N_TONES_PER_PRB * ug.nPrb);
+    sa.n_layers = static_cast<int>(drvdUeGrp.nLayers);
+    sa.n_h_pos = static_cast<int>(drvdUeGrp.dmrsAddlnPos + 1);
+    sa.h_s0 = drvdUeGrp.tInfoHEst.strides[0];
+    sa.h_s1 = drvdUeGrp.tInfoHEst.strides[1];
+    sa.h_s2 = drvdUeGrp.tInfoHEst.strides[2];
+    sa.h_s3 = drvdUeGrp.tInfoHEst.strides[3];
+    sa.dmrs_port_bmsk = naiIn.dmrs_port_bmsk ? naiIn.dmrs_port_bmsk : static_cast<uint16_t>(ue.dmrsPortBmsk);
+    sa.prb_start = static_cast<int>(ug.startPrb);
+    sa.n_prb = static_cast<int>(ug.nPrb);
+    sa.sym_start = static_cast<int>(ug.puschStartSym);
+    sa.n_sym = static_cast<int>(ug.nPuschSym);
+    sa.dmrs_sym_bmsk = static_cast<int>(ug.dmrsSymLocBmsk);
+    // PdschTx writes its output tensor using strides derived from the cell's nPrbDlBwp:
+    //   sym stride  = nPrbDlBwp * CUPHY_N_TONES_PER_PRB
+    //   port stride = nPrbDlBwp * CUPHY_N_TONES_PER_PRB * OFDM_SYMBOLS_PER_SLOT
+    // (see pdsch_dmrs.cu:379 / dl_rate_matching.cu all_Rbs_symbols). Using the full 273-PRB grid
+    // strides here would point reads outside the written region, leaving tx=0 and ni=rx.
+    constexpr int kMaxSym = OFDM_SYMBOLS_PER_SLOT;
+    constexpr int kMaxTxPorts = 16;
+    const cuphyPuschCellDynPrm_t& cellDyn0 = m_cuphyPuschCellGrpDynPrm.pCellPrms[0];
+    const uint16_t cellStatIdx0 = cellDyn0.cellPrmStatIdx;
+    uint16_t bwpDlPrbs = (cellStatIdx0 < m_cuphyCellStatPrmVecCpu.size())
+        ? m_cuphyCellStatPrmVecCpu[cellStatIdx0].nPrbDlBwp
+        : static_cast<uint16_t>(273);
+    if (bwpDlPrbs == 0) {
+        bwpDlPrbs = 273;
+    }
+    const int bwpNf = static_cast<int>(bwpDlPrbs) * CUPHY_N_TONES_PER_PRB;
+    sa.tx_nf = bwpNf;
+    sa.tx_nt = kMaxSym;
+    sa.tx_n_ports = kMaxTxPorts;
+    sa.tx_s0 = 1;
+    sa.tx_s1 = bwpNf;
+    sa.tx_s2 = bwpNf * kMaxSym;
+
+    m_naiSubGraphKernelParamsDriver[mi].gridDimX = static_cast<unsigned>((static_cast<unsigned>(sa.n_sc_alloc) + 63u) / 64u);
+    m_naiSubGraphKernelParamsDriver[mi].gridDimY = static_cast<unsigned>(sa.n_sym);
+    m_naiSubGraphKernelParamsDriver[mi].gridDimZ = static_cast<unsigned>(sa.n_ant_rx);
+    CU_CHECK_EXCEPTION(cuGraphExecKernelNodeSetParams(graphExecSch, m_naiNiSubNode[mi], &m_naiSubGraphKernelParamsDriver[mi]));
+
+    apply_nai_tail_enable_state(1, 1, 1);
+
+    static std::atomic<int> s_full_sync{0};
+    if (s_full_sync.fetch_add(1) < 16) {
+        NVLOGC_FMT(NVLOG_PUSCH,
+            "{}: NAI MQ step 3/4 OK — copy + PdschTx child + NI subtract params synced (mode_idx={})",
+            __FUNCTION__,
+            mi);
+    }
+}
+
 void PuschRx::createFullSlotGraph(cuphyPuschFullSlotProcMode_t fullSlotProcMode,
                                   CUgraph&                     fullSlotGraph,
                                   CUgraphNode&                 emptyRootNode,
@@ -4014,6 +4385,7 @@ void PuschRx::createFullSlotGraph(cuphyPuschFullSlotProcMode_t fullSlotProcMode,
         // No further graph nodes depend on SCH backend in this function today,
         // but keep / move the terminal nodes if needed for future extensions.
         schParents = std::move(schStage.terminalNodes);
+        appendNaiMqTailGraphNodesAfterSchCrc(fullSlotProcMode, *condInfo.m_pGraph[2]);
     }
 
     //===================================== Device-graph launch wiring (DGL) ===================================/
@@ -4505,6 +4877,7 @@ void PuschRx::updateFullSlotGraph(bool disableAllNodes, cuphyPuschFullSlotProcMo
             CU_CHECK_EXCEPTION(cuGraphNodeSetEnabled(graph_exec[2], m_crcNodes[fullSlotProcMode][1], 0));
         }
     }
+    updateNaiMqTailGraphNodes(disableAllNodes, fullSlotProcMode, graph_exec[2]);
     if(m_chEstSettings.enableRssiMeasurement)
     {
         nCfgs = disableAllNodes? 0 : (((!m_earlyHarqModeEnabled)||(!m_subSlotProcessingFrontLoadedDmrsEnabled))? m_rsrpLaunchCfgs[CUPHY_PUSCH_FULL_SLOT_PATH].nCfgs : 0);
@@ -4702,6 +5075,12 @@ PuschRx::~PuschRx()
         CUDA_CHECK_NO_THROW(cudaGraphDestroy(m_preSubSlotGraph));
         CUDA_CHECK_NO_THROW(cudaGraphExecDestroy(m_preSubSlotGraphExec));
         destroyComponents();
+        m_naiRecon.reset();
+        if (m_niGridDev) {
+            CUDA_CHECK_NO_THROW(cudaFree(m_niGridDev));
+            m_niGridDev = nullptr;
+            m_niGridBytes = 0;
+        }
     }
     catch(...)
     {
@@ -4897,6 +5276,169 @@ cuphyStatus_t PuschRx::copyOutputToCPU(cudaStream_t cuStrm)
         NVLOGE_FMT(NVLOG_PUSCH, AERIAL_CUPHY_EVENT, "Launching batched memcpy for PUSCH returned an error");
     }
     return status;
+}
+
+void PuschRx::waitGpuFullSlotDataRxReadyOnStream(cudaStream_t targetStream)
+{
+    if (m_earlyHarqModeEnabled)
+    {
+        CUDA_CHECK(cudaStreamWaitEvent(targetStream, m_cuphyPuschStatPrms.subSlotCompletedEvent, 0));
+    }
+    if (phase1Stream != targetStream)
+    {
+        MemtraceDisableScope md;
+        CUDA_CHECK_EXCEPTION(cudaStreamWaitEvent(targetStream, m_phase1Complete.handle(), 0));
+    }
+}
+
+bool PuschRx::resolveResgridRxSlot(int32_t cellIdxMq, ResgridRxSlotView& out) const
+{
+    out = {};
+    if (cellIdxMq >= m_cuphyPuschCellGrpDynPrm.nCells)
+    {
+        return false;
+    }
+    const int32_t cellPrmDynIdx  = m_cuphyPuschCellGrpDynPrm.pCellPrms[cellIdxMq].cellPrmDynIdx;
+    const int32_t cellPrmStatIdx = m_cuphyPuschCellGrpDynPrm.pCellPrms[cellIdxMq].cellPrmStatIdx;
+
+    const cuphyPuschDataIn_t* pDataIn = m_cuphyPuschDynPrms.pDataIn;
+    const cuphyTensorPrm_t*   tp      = nullptr;
+    if (pDataIn && pDataIn->pTDataRx && cellPrmDynIdx >= 0)
+    {
+        const cuphyTensorPrm_t& tref = pDataIn->pTDataRx[cellPrmDynIdx];
+        if (tref.pAddr && tref.desc)
+        {
+            tp = &tref;
+        }
+    }
+
+    const tensor_desc* pTDesc = nullptr;
+    const void*        dev    = nullptr;
+    if (tp)
+    {
+        pTDesc = &static_cast<const tensor_desc&>(*tp->desc);
+        dev    = tp->pAddr;
+    }
+    else if (m_tRefDataRx[cellIdxMq].addr())
+    {
+        pTDesc = &static_cast<const tensor_desc&>(*m_tRefDataRx[cellIdxMq].desc().handle());
+        dev    = m_tRefDataRx[cellIdxMq].addr();
+    }
+    else
+    {
+        return false;
+    }
+
+    const tensor_desc& tDesc = *pTDesc;
+    const auto&        lay   = tDesc.layout();
+    out.dev        = dev;
+    out.d0         = lay.dimensions[0];
+    out.d1         = lay.dimensions[1];
+    out.d2         = lay.dimensions[2];
+    out.s0         = lay.strides[0];
+    out.s1         = lay.strides[1];
+    out.s2         = lay.strides[2];
+    out.fp16       = (tDesc.type() == CUPHY_C_16F);
+    out.nbytes     = tDesc.get_size_in_bytes();
+    const int n_prb_grid = out.d0 / CUPHY_N_TONES_PER_PRB;
+    out.ul_prb_cfg = std::max(static_cast<int>(m_cuphyCellStatPrmVecCpu[cellPrmStatIdx].nPrbUlBwp), n_prb_grid);
+    return static_cast<bool>(out);
+}
+
+void PuschRx::enqueueResgridDevToMq(cudaStream_t cuStrm, cuphy_mq_channel ch, const void* dev_payload, const ResgridRxSlotView& slot) const
+{
+    cuphy_mq_enqueue_from_device(ch,
+        cuStrm,
+        const_cast<void*>(dev_payload),
+        slot.nbytes,
+        slot.d0,
+        slot.d1,
+        slot.d2,
+        slot.fp16,
+        slot.ul_prb_cfg,
+        slot.s0,
+        slot.s1,
+        slot.s2);
+}
+
+void PuschRx::enqueueResgridMqExportsAfterFullSlotWork(cudaStream_t cuStrm)
+{
+    copyRxToMq(cuStrm);
+    copyNaiToMq(cuStrm);
+}
+
+void PuschRx::copyRxToMq(cudaStream_t cuStrm)
+{
+    if (!cuphy_mq_export_enabled(cuphy_mq_channel::rx))
+    {
+        return;
+    }
+
+    constexpr int32_t     cellIdxMq = 0;
+    ResgridRxSlotView     slot {};
+    if (!resolveResgridRxSlot(cellIdxMq, slot))
+    {
+        return;
+    }
+
+    enqueueResgridDevToMq(cuStrm, cuphy_mq_channel::rx, slot.dev, slot);
+}
+
+void PuschRx::copyNaiToMq(cudaStream_t cuStrm)
+{
+    // Step 4/4 (runtime, post full-slot graph): export NI buffer (m_niGridDev) to the NAI MQ on cuStrm.
+    if (!cuphy_mq_export_enabled(cuphy_mq_channel::nai))
+    {
+        return;
+    }
+
+    if (!m_naiTailEmbeddedInFullSlotGraph || !m_cudaGraphModeEnabled)
+    {
+        static std::atomic<int> s_skip{0};
+        if (s_skip.fetch_add(1) < 8) {
+            NVLOGW_FMT(NVLOG_PUSCH,
+                "{}: NAI MQ export skipped — need embedded tail (naiTail={}) and full-slot CUDA graphs (cudaGraph={}); "
+                "set CUPHY_NAI_MQ_ENABLE=1 before start, fix NAI warmup if init failed, and ensure procMode includes full-slot graphs",
+                __FUNCTION__,
+                static_cast<int>(m_naiTailEmbeddedInFullSlotGraph),
+                static_cast<int>(m_cudaGraphModeEnabled));
+        }
+        return;
+    }
+
+    constexpr int32_t     cellIdxMq = 0;
+    ResgridRxSlotView     slot {};
+    if (!resolveResgridRxSlot(cellIdxMq, slot))
+    {
+        static std::atomic<int> s_res{0};
+        if (s_res.fetch_add(1) < 8) {
+            NVLOGW_FMT(NVLOG_PUSCH, "{}: NAI MQ export skipped — resolveResgridRxSlot failed (no RX resgrid descriptor for MQ cell 0)", __FUNCTION__);
+        }
+        return;
+    }
+
+    if (!m_niGridDev || m_niGridBytes < slot.nbytes)
+    {
+        if (m_niGridDev) {
+            (void)cudaFree(m_niGridDev);
+            m_niGridDev = nullptr;
+            m_niGridBytes = 0;
+        }
+        if (cudaMalloc(&m_niGridDev, slot.nbytes) != cudaSuccess) {
+            NVLOGE_FMT(NVLOG_PUSCH, AERIAL_CUPHY_EVENT, "{}: NAI MQ step 4/4 — cudaMalloc(m_niGridDev) failed; skip MQ export", __FUNCTION__);
+            return;
+        }
+        m_niGridBytes = slot.nbytes;
+    }
+
+    enqueueResgridDevToMq(cuStrm, cuphy_mq_channel::nai, m_niGridDev, slot);
+    static std::atomic<int> s_mq_ok{0};
+    if (s_mq_ok.fetch_add(1) < 16) {
+        NVLOGC_FMT(NVLOG_PUSCH,
+            "{}: NAI MQ step 4/4 OK — resgrid NI export enqueued after full-slot work (bytes={})",
+            __FUNCTION__,
+            static_cast<unsigned long long>(slot.nbytes));
+    }
 }
 
 void PuschRx::writeDbgBufSynch(cudaStream_t cuStream)
@@ -6136,57 +6678,25 @@ cuphyStatus_t PuschRx::run(cuphyPuschRunPhase_t runPhase)
 
     if((runPhase == PUSCH_RUN_FULL_SLOT_COPY) || (runPhase == PUSCH_RUN_ALL_PHASES))
     {
+        if (m_outputPrms.cpuCopyOn || cuphy_mq_export_enabled(cuphy_mq_channel::rx)
+            || cuphy_mq_export_enabled(cuphy_mq_channel::nai))
+        {
+            waitGpuFullSlotDataRxReadyOnStream(phase2Stream);
+        }
         if(m_outputPrms.cpuCopyOn)
         {
-            if (m_earlyHarqModeEnabled)
-            {
-                // ensure writing at the end of early-HARQ is complete before proceeding to overwrite the output buffers
-                // this wait is equivalent to m_G0streamPool.join(phase1Stream)
-                CUDA_CHECK(cudaStreamWaitEvent(phase2Stream, m_cuphyPuschStatPrms.subSlotCompletedEvent, 0));
-            }
-            if(phase1Stream != phase2Stream)
-            {
-                //If streams are different then force ordering using event
-                MemtraceDisableScope md;
-                CUDA_CHECK_EXCEPTION(cudaStreamWaitEvent(phase2Stream, m_phase1Complete.handle(),0));
-            }
             //Use second stream for copying output data to CPU
-
-#if 0 // Enable profiling to measure the time taken for the D2H copy
-            if (nvlog::isLogLevel(NVLOG_PUSCH, fmtlog::DBG))
-            {
-                cudaEvent_t copyStartEvent, copyEndEvent;
-                CUDA_CHECK_EXCEPTION(cudaEventCreate(&copyStartEvent));
-                CUDA_CHECK_EXCEPTION(cudaEventCreate(&copyEndEvent));
-                CUDA_CHECK_EXCEPTION(cudaEventRecord(copyStartEvent, phase2Stream));
-
-                cuphyStatus_t copy_output_to_cpu_status = copyOutputToCPU(phase2Stream);
-
-                CUDA_CHECK_EXCEPTION(cudaEventRecord(copyEndEvent, phase2Stream));
-                // Synchronize the stream to ensure all D2H copies are complete before proceeding
-                CUDA_CHECK_EXCEPTION(cudaStreamSynchronize(phase2Stream));
-
-                float copyTimeMs = 0.0f;
-                CUDA_CHECK_EXCEPTION(cudaEventElapsedTime(&copyTimeMs, copyStartEvent, copyEndEvent));
-                NVLOGD_FMT(NVLOG_PUSCH, "D2H Copy (Op #1) execution time: {:.3f} ms", copyTimeMs);
-
-                // Cleanup events
-                CUDA_CHECK_EXCEPTION(cudaEventDestroy(copyStartEvent));
-                CUDA_CHECK_EXCEPTION(cudaEventDestroy(copyEndEvent));
-            }
-            else
-            {
-                cuphyStatus_t copy_output_to_cpu_status = copyOutputToCPU(phase2Stream);
-            }
-#else
             cuphyStatus_t copy_output_to_cpu_status = copyOutputToCPU(phase2Stream);
-#endif
             if(copy_output_to_cpu_status != CUPHY_STATUS_SUCCESS)
             {
                 NVLOGE_FMT(NVLOG_PUSCH, AERIAL_CUPHY_EVENT, "Launching batched memcpy for PUSCH returned an error");
                 status = copy_output_to_cpu_status; // Could potentially return immediately (would need to POP_RANGE etc.), but in this case no harm in returning at the end.
                 //return copy_output_to_cpu_status;
             }
+        }
+        if (cuphy_mq_export_enabled(cuphy_mq_channel::rx) || cuphy_mq_export_enabled(cuphy_mq_channel::nai))
+        {
+            enqueueResgridMqExportsAfterFullSlotWork(phase2Stream);
         }
     }
 
@@ -7281,7 +7791,15 @@ cuphyStatus_t CUPHYWINAPI cuphyWriteDbgBufSynch(cuphyPuschRxHndl_t puschRxHndl, 
     {
         PuschRx* p = static_cast<PuschRx*>(puschRxHndl);
         p->writeDbgBufSynch(cuStream);
-        return p->copyOutputToCPU(cuStream);
+        // Same ordering as PUSCH_RUN_FULL_SLOT_COPY: DataRx D2H / mq must follow full-slot GPU work
+        // (PhyPuschAggr does not insert end_run_ph1 around this API path).
+        p->waitGpuFullSlotDataRxReadyOnStream(cuStream);
+        cuphyStatus_t st = p->copyOutputToCPU(cuStream);
+        if (cuphy_mq_export_enabled(cuphy_mq_channel::rx) || cuphy_mq_export_enabled(cuphy_mq_channel::nai))
+        {
+            p->enqueueResgridMqExportsAfterFullSlotWork(cuStream);
+        }
+        return st;
     });
 }
 

@@ -201,7 +201,7 @@ cuphyStatus_t CUPHYWINAPI cuphyUpdatePdschDmrsParams(PdschDmrsParams * h_dmrs_pa
             h_dmrs_params[TB_id].num_BWP_PRBs = static_cell_params->nPrbDlBwp; // Superfluous
             if (h_dmrs_params[TB_id].num_Rbs > h_dmrs_params[TB_id].num_BWP_PRBs) {
                 NVLOGE_FMT(NVLOG_PDSCH, AERIAL_CUPHY_EVENT, "Allocated PRBs {} are more than the PRBs {} in this BWP (bandwidth part)!",
-                           h_dmrs_params[TB_id].num_BWP_PRBs, static_cell_params->nPrbDlBwp);
+                           h_dmrs_params[TB_id].num_Rbs, h_dmrs_params[TB_id].num_BWP_PRBs);
                 return CUPHY_STATUS_INVALID_ARGUMENT;
             }
             h_dmrs_params[TB_id].cell_index_in_cell_group = dyn_cell; //Used to find this cell's RE map
