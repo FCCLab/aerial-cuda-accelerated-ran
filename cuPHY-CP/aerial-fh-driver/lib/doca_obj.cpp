@@ -637,10 +637,13 @@ doca_create_tx_queue(struct doca_tx_items *item, struct doca_gpu *gpu_dev, struc
 		}
 	}	
 
-	result = doca_eth_txq_set_wait_on_time_offload(item->eth_txq_cpu);
-	if (result != DOCA_SUCCESS) {
-		// DOCA_LOG_ERR("Failed to set eth_txq num packets: {}", doca_error_get_descr(result));
-		return DOCA_ERROR_BAD_STATE;
+	enum doca_eth_wait_on_time_type wait_on_time_mode = DOCA_ETH_WAIT_ON_TIME_TYPE_NONE;
+	if (doca_eth_txq_cap_get_wait_on_time_offload_supported(doca_dev_as_devinfo(item->ddev), &wait_on_time_mode) == DOCA_SUCCESS
+	    && wait_on_time_mode != DOCA_ETH_WAIT_ON_TIME_TYPE_NONE && wait_on_time_mode != DOCA_ETH_WAIT_ON_TIME_TYPE_DPDK) {
+		result = doca_eth_txq_set_wait_on_time_offload(item->eth_txq_cpu);
+		if (result != DOCA_SUCCESS) {
+			return DOCA_ERROR_BAD_STATE;
+		}
 	}
 
 	item->eth_txq_ctx = doca_eth_txq_as_doca_ctx(item->eth_txq_cpu);

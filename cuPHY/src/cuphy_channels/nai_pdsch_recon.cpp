@@ -125,8 +125,7 @@ cuphyStatus_t NaiPdschRecon::setupDynForUe(const NaiPuschSlotInput& in,
 
     std::memset(m_rbBitmap, 0, sizeof(m_rbBitmap));
 
-    m_dmrsDyn.nDmrsCdmGrpsNoData = ug.pDmrsDynPrm->nDmrsCdmGrpsNoData;
-    m_dmrsDyn.dmrsScrmId = ug.pDmrsDynPrm->dmrsScrmId;
+    m_dmrsDyn.nDmrsCdmGrpsNoData = ug.pDmrsDynPrm ? ug.pDmrsDynPrm->nDmrsCdmGrpsNoData : 1;
 
     const int32_t cellIdxMq = 0;
     const auto& cellDyn = in.cell_grp->pCellPrms[cellIdxMq];
@@ -156,6 +155,7 @@ cuphyStatus_t NaiPdschRecon::setupDynForUe(const NaiPuschSlotInput& in,
 
     m_ueDyn = {};
     m_ueDyn.pUeGrpPrm = &m_ueGrpDyn;
+    m_ueDyn.dmrsScrmId = ug.pDmrsDynPrm ? ug.pDmrsDynPrm->dmrsScrmId : 0;
     m_ueDyn.scid = ue.scid;
     m_ueDyn.nUeLayers = ue.nUeLayers;
     m_ueDyn.dmrsPortBmsk = ue.dmrsPortBmsk;

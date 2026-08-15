@@ -162,6 +162,26 @@ get_dpdk_port_id_doca_dev(struct doca_dev *dev_input, uint16_t *port_id)
 	return DOCA_SUCCESS;
 }
 
+static bool is_cx6_device(const char* pci_name)
+{
+    if (!pci_name || !*pci_name) return false;
+    char path[256];
+    snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/device", pci_name);
+    FILE* f = fopen(path, "r");
+    if (f) {
+        char buf[32] = {0};
+        if (fgets(buf, sizeof(buf), f)) {
+            unsigned int dev_id = 0;
+            if (sscanf(buf, "0x%x", &dev_id) == 1 || sscanf(buf, "%x", &dev_id) == 1) {
+                fclose(f);
+                return (dev_id >= 0x1013 && dev_id <= 0x101e);
+            }
+        }
+        fclose(f);
+    }
+    return false;
+}
+
 static doca_error_t
 open_doca_device_with_pci(const char *pcie_value, struct doca_dev **retval)
 {
@@ -180,7 +200,7 @@ open_doca_device_with_pci(const char *pcie_value, struct doca_dev **retval)
 		return result;
 	}
 
-	/* Search */
+	/* Search exact match */
 	for (i = 0; i < nb_devs; i++) {
 		result = doca_devinfo_is_equal_pci_addr(dev_list[i], pcie_value, &is_addr_equal);
 		if (result == DOCA_SUCCESS && is_addr_equal) {
@@ -193,7 +213,24 @@ open_doca_device_with_pci(const char *pcie_value, struct doca_dev **retval)
 		}
 	}
 
-	NVLOGE_FMT(TAG, AERIAL_DPDK_API_EVENT, "Matching device not found.");
+	/* Fallback: match function 0 if secondary port passed (e.g. 0000:01:00.1 -> 0000:01:00.0) */
+	std::string pci_fn0(pcie_value);
+	auto dot_pos = pci_fn0.rfind('.');
+	if (dot_pos != std::string::npos && dot_pos + 1 < pci_fn0.size() && pci_fn0[dot_pos + 1] != '0') {
+		pci_fn0[dot_pos + 1] = '0';
+		for (i = 0; i < nb_devs; i++) {
+			result = doca_devinfo_is_equal_pci_addr(dev_list[i], pci_fn0.c_str(), &is_addr_equal);
+			if (result == DOCA_SUCCESS && is_addr_equal) {
+				result = doca_dev_open(dev_list[i], retval);
+				if (result == DOCA_SUCCESS) {
+					doca_devinfo_destroy_list(dev_list);
+					return result;
+				}
+			}
+		}
+	}
+
+	NVLOGE_FMT(TAG, AERIAL_DPDK_API_EVENT, "Matching device not found for {}.", pcie_value);
 	result = DOCA_ERROR_NOT_FOUND;
 
 	doca_devinfo_destroy_list(dev_list);
@@ -207,7 +244,7 @@ void Nic::doca_probe_device()
 	auto name                  = info_.name.c_str();
     auto accu_tx_sched_disable = fhi_->get_info().accu_tx_sched_disable;
     auto accu_tx_sched_res_ns  = fhi_->get_info().accu_tx_sched_res_ns;
-    enum doca_eth_wait_on_time_type wait_on_time_mode;
+    enum doca_eth_wait_on_time_type wait_on_time_mode = DOCA_ETH_WAIT_ON_TIME_TYPE_NONE;
 
     StringBuilder devargs_builder;
 
@@ -218,13 +255,16 @@ void Nic::doca_probe_device()
         NVLOGE_FMT(TAG,AERIAL_DPDK_API_EVENT,"open_doca_device_with_pci returned {}", doca_error_get_descr(ret_doca));
     }
 
-	ret_doca = doca_eth_txq_cap_get_wait_on_time_offload_supported(doca_dev_as_devinfo(ddev_), &wait_on_time_mode);
-	if (ret_doca != DOCA_SUCCESS)
+	if (ddev_)
     {
-        NVLOGE_FMT(TAG,AERIAL_DPDK_API_EVENT,"doca_eth_txq_get_wait_on_time_offload_supported returned {}", doca_error_get_descr(ret_doca));
+        ret_doca = doca_eth_txq_cap_get_wait_on_time_offload_supported(doca_dev_as_devinfo(ddev_), &wait_on_time_mode);
+        if (ret_doca != DOCA_SUCCESS)
+        {
+            NVLOGE_FMT(TAG,AERIAL_DPDK_API_EVENT,"doca_eth_txq_get_wait_on_time_offload_supported returned {}", doca_error_get_descr(ret_doca));
+        }
     }
 
-    if(wait_on_time_mode == DOCA_ETH_WAIT_ON_TIME_TYPE_DPDK)
+    if(wait_on_time_mode == DOCA_ETH_WAIT_ON_TIME_TYPE_DPDK || is_cx6_device(name))
     {
         cx6 = true;
         NVLOGI_FMT(TAG, "cx6 device, wait_on_time_mode ={}", +wait_on_time_mode);
