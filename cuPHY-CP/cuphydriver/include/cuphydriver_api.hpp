@@ -218,6 +218,8 @@ static constexpr char CELL_PARAM_UL_GAIN_CALIBRATION[] = "ul_gain_calibration"; 
 static constexpr char CELL_PARAM_LOWER_GUARD_BW[] = "lower_guard_bw";                          ///< Cell parameter key: Lower guard bandwidth
 static constexpr char CELL_PARAM_REF_DL[] = "ref_dl";                                          ///< Cell parameter key: Downlink reference power
 static constexpr char CELL_PARAM_NIC[] = "nic";                                                ///< Cell parameter key: Network interface card name
+static constexpr char CELL_PARAM_GAMMA_DL[] = "gamma_dl";                                      ///< Live DL scale (beta_dl * oam_linear_gain * gamma_dl)
+static constexpr char CELL_PARAM_GAMMA_UL[] = "gamma_ul";                                      ///< Live UL scale (beta_ul * oam_linear_gain * gamma_ul)
 
 
 struct nic_cfg

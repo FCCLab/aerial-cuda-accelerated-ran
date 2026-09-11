@@ -2502,7 +2502,13 @@ int l1_cell_update_cell_config(phydriver_handle pdh, uint16_t mplane_id, std::un
         std::unordered_set<std::string> del;
         for(auto& p : attrs)
         {
-            if(strcmp(p.first.c_str(), CELL_PARAM_NIC) == 0) continue;
+            // Live power scales are safe while the cell is active (same as attenuation).
+            if(strcmp(p.first.c_str(), CELL_PARAM_NIC) == 0
+            || strcmp(p.first.c_str(), CELL_PARAM_GAMMA_DL) == 0
+            || strcmp(p.first.c_str(), CELL_PARAM_GAMMA_UL) == 0)
+            {
+                continue;
+            }
             NVLOGC_FMT(TAG, "Cell active, skip updating '{}' ", p.first);
             res[p.first] = -1;
             del.insert(p.first);
@@ -2599,7 +2605,8 @@ int l1_cell_update_cell_config(phydriver_handle pdh, uint16_t mplane_id, std::un
         }
 
         if(strcmp(p.first.c_str(), CELL_PARAM_NIC) != 0 && strcmp(p.first.c_str(), CELL_PARAM_DST_MAC_ADDR) != 0
-        && strcmp(p.first.c_str(), CELL_PARAM_VLAN_ID) != 0 && strcmp(p.first.c_str(), CELL_PARAM_PCP) != 0)
+        && strcmp(p.first.c_str(), CELL_PARAM_VLAN_ID) != 0 && strcmp(p.first.c_str(), CELL_PARAM_PCP) != 0
+        && strcmp(p.first.c_str(), CELL_PARAM_GAMMA_DL) != 0 && strcmp(p.first.c_str(), CELL_PARAM_GAMMA_UL) != 0)
         {
             NVLOGC_FMT(TAG, "{} updated to {:.0f} ", p.first.c_str(), p.second);
         }
@@ -2685,6 +2692,32 @@ int l1_cell_update_cell_config(phydriver_handle pdh, uint16_t mplane_id, std::un
         else if(strcmp(p.first.c_str(), CELL_PARAM_REF_DL) == 0)
         {
             c->setRefDl(p.second);
+        }
+        else if(strcmp(p.first.c_str(), CELL_PARAM_GAMMA_DL) == 0)
+        {
+            if(p.second <= 0.0)
+            {
+                NVLOGC_FMT(TAG, "Invalid {}: {} (must be > 0), skip", CELL_PARAM_GAMMA_DL, p.second);
+                res[p.first] = -1;
+            }
+            else
+            {
+                NVLOGC_FMT(TAG, "{} updated to {:.6f} ", CELL_PARAM_GAMMA_DL, p.second);
+                c->setGammaDl(static_cast<float>(p.second));
+            }
+        }
+        else if(strcmp(p.first.c_str(), CELL_PARAM_GAMMA_UL) == 0)
+        {
+            if(p.second <= 0.0)
+            {
+                NVLOGC_FMT(TAG, "Invalid {}: {} (must be > 0), skip", CELL_PARAM_GAMMA_UL, p.second);
+                res[p.first] = -1;
+            }
+            else
+            {
+                NVLOGC_FMT(TAG, "{} updated to {:.6f} ", CELL_PARAM_GAMMA_UL, p.second);
+                c->setGammaUl(static_cast<float>(p.second));
+            }
         }
         else if(strcmp(p.first.c_str(), CELL_PARAM_NIC) == 0)
         {
