@@ -79,6 +79,10 @@ Cell::Cell(
     gamma_dl               = 1;
     gamma_ul               = 1;
     force_thr0             = 0;
+    pbch_theta             = 1;
+    csirs_theta            = 1;
+    pdcch_theta            = 1;
+    pdsch_theta            = 1;
     t1a_max_up_ns          = _mplane.t1a_max_up_ns;
     t1a_max_cp_ul_ns       = _mplane.t1a_max_cp_ul_ns;
     t1a_min_cp_ul_ns       = _mplane.t1a_min_cp_ul_ns;
@@ -1422,6 +1426,26 @@ void Cell::setPrachForceThr0(float force_thr0)
     this->force_thr0 = force_thr0;
 }
 
+void Cell::setPbchTheta(float theta)
+{
+    this->pbch_theta = theta;
+}
+
+void Cell::setCsirsTheta(float theta)
+{
+    this->csirs_theta = theta;
+}
+
+void Cell::setPdcchTheta(float theta)
+{
+    this->pdcch_theta = theta;
+}
+
+void Cell::setPdschTheta(float theta)
+{
+    this->pdsch_theta = theta;
+}
+
 float Cell::getGammaDl() const
 {
     return gamma_dl.load();
@@ -1435,6 +1459,26 @@ float Cell::getGammaUl() const
 float Cell::getPrachForceThr0() const
 {
     return force_thr0.load();
+}
+
+float Cell::getPbchTheta() const
+{
+    return pbch_theta.load();
+}
+
+float Cell::getCsirsTheta() const
+{
+    return csirs_theta.load();
+}
+
+float Cell::getPdcchTheta() const
+{
+    return pdcch_theta.load();
+}
+
+float Cell::getPdschTheta() const
+{
+    return pdsch_theta.load();
 }
 
 float Cell::getBetaUlPowerScaling() const

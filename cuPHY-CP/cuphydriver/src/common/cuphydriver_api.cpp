@@ -2498,6 +2498,17 @@ int l1_cell_update_cell_config(phydriver_handle pdh, uint16_t mplane_id, std::un
     return 0;
 }
 
+static bool is_live_oam_attr(const char* key)
+{
+    return strcmp(key, CELL_PARAM_GAMMA_DL) == 0
+        || strcmp(key, CELL_PARAM_GAMMA_UL) == 0
+        || strcmp(key, CELL_PARAM_FORCE_THR0) == 0
+        || strcmp(key, CELL_PARAM_PBCH_THETA) == 0
+        || strcmp(key, CELL_PARAM_CSIRS_THETA) == 0
+        || strcmp(key, CELL_PARAM_PDCCH_THETA) == 0
+        || strcmp(key, CELL_PARAM_PDSCH_THETA) == 0;
+}
+
 int l1_cell_update_cell_config(phydriver_handle pdh, uint16_t mplane_id, std::unordered_map<std::string, double>& attrs, std::unordered_map<std::string, int>& res)
 {
     PhyDriverCtx* pdctx = nullptr;
@@ -2518,10 +2529,7 @@ int l1_cell_update_cell_config(phydriver_handle pdh, uint16_t mplane_id, std::un
         for(auto& p : attrs)
         {
             // Live power scales are safe while the cell is active (same as attenuation).
-            if(strcmp(p.first.c_str(), CELL_PARAM_NIC) == 0
-            || strcmp(p.first.c_str(), CELL_PARAM_GAMMA_DL) == 0
-            || strcmp(p.first.c_str(), CELL_PARAM_GAMMA_UL) == 0
-            || strcmp(p.first.c_str(), CELL_PARAM_FORCE_THR0) == 0)
+            if(strcmp(p.first.c_str(), CELL_PARAM_NIC) == 0 || is_live_oam_attr(p.first.c_str()))
             {
                 continue;
             }
@@ -2622,8 +2630,7 @@ int l1_cell_update_cell_config(phydriver_handle pdh, uint16_t mplane_id, std::un
 
         if(strcmp(p.first.c_str(), CELL_PARAM_NIC) != 0 && strcmp(p.first.c_str(), CELL_PARAM_DST_MAC_ADDR) != 0
         && strcmp(p.first.c_str(), CELL_PARAM_VLAN_ID) != 0 && strcmp(p.first.c_str(), CELL_PARAM_PCP) != 0
-        && strcmp(p.first.c_str(), CELL_PARAM_GAMMA_DL) != 0 && strcmp(p.first.c_str(), CELL_PARAM_GAMMA_UL) != 0
-        && strcmp(p.first.c_str(), CELL_PARAM_FORCE_THR0) != 0)
+        && !is_live_oam_attr(p.first.c_str()))
         {
             NVLOGC_FMT(TAG, "{} updated to {:.0f} ", p.first.c_str(), p.second);
         }
@@ -2747,6 +2754,58 @@ int l1_cell_update_cell_config(phydriver_handle pdh, uint16_t mplane_id, std::un
             {
                 NVLOGC_FMT(TAG, "{} updated to {:.6f} ", CELL_PARAM_FORCE_THR0, p.second);
                 c->setPrachForceThr0(static_cast<float>(p.second));
+            }
+        }
+        else if(strcmp(p.first.c_str(), CELL_PARAM_PBCH_THETA) == 0)
+        {
+            if(p.second <= 0.0)
+            {
+                NVLOGC_FMT(TAG, "Invalid {}: {} (must be > 0), skip", CELL_PARAM_PBCH_THETA, p.second);
+                res[p.first] = -1;
+            }
+            else
+            {
+                NVLOGC_FMT(TAG, "{} updated to {:.6f} ", CELL_PARAM_PBCH_THETA, p.second);
+                c->setPbchTheta(static_cast<float>(p.second));
+            }
+        }
+        else if(strcmp(p.first.c_str(), CELL_PARAM_CSIRS_THETA) == 0)
+        {
+            if(p.second <= 0.0)
+            {
+                NVLOGC_FMT(TAG, "Invalid {}: {} (must be > 0), skip", CELL_PARAM_CSIRS_THETA, p.second);
+                res[p.first] = -1;
+            }
+            else
+            {
+                NVLOGC_FMT(TAG, "{} updated to {:.6f} ", CELL_PARAM_CSIRS_THETA, p.second);
+                c->setCsirsTheta(static_cast<float>(p.second));
+            }
+        }
+        else if(strcmp(p.first.c_str(), CELL_PARAM_PDCCH_THETA) == 0)
+        {
+            if(p.second <= 0.0)
+            {
+                NVLOGC_FMT(TAG, "Invalid {}: {} (must be > 0), skip", CELL_PARAM_PDCCH_THETA, p.second);
+                res[p.first] = -1;
+            }
+            else
+            {
+                NVLOGC_FMT(TAG, "{} updated to {:.6f} ", CELL_PARAM_PDCCH_THETA, p.second);
+                c->setPdcchTheta(static_cast<float>(p.second));
+            }
+        }
+        else if(strcmp(p.first.c_str(), CELL_PARAM_PDSCH_THETA) == 0)
+        {
+            if(p.second <= 0.0)
+            {
+                NVLOGC_FMT(TAG, "Invalid {}: {} (must be > 0), skip", CELL_PARAM_PDSCH_THETA, p.second);
+                res[p.first] = -1;
+            }
+            else
+            {
+                NVLOGC_FMT(TAG, "{} updated to {:.6f} ", CELL_PARAM_PDSCH_THETA, p.second);
+                c->setPdschTheta(static_cast<float>(p.second));
             }
         }
         else if(strcmp(p.first.c_str(), CELL_PARAM_NIC) == 0)

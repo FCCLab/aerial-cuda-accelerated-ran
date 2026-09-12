@@ -171,6 +171,31 @@ int PhyPbchAggr::setup(const std::vector<DLOutputBuffer *>& aggr_dlbuf, const st
             NVLOGE_FMT(TAG, AERIAL_CUPHYDRV_API_EVENT,"NID = {}, SS block index = {} Output_buf not found",pbch_per_cell_data.NID, pbch_dyn_data.blockIndex);
     }
 
+    for (uint i = 0; i < group_params->nSsbBlocks; i++)
+    {
+        auto& pbch_dyn_data = group_params->pbch_dyn_block_params[i];
+        const auto& pbch_per_cell_data = group_params->pbch_dyn_cell_params[pbch_dyn_data.cell_index];
+        const uint8_t slot_buff_idx = pbch_per_cell_data.slotBufferIdx;
+        Cell* cell = nullptr;
+        if(slot_buff_idx < group_params->phy_cell_index_list.size())
+        {
+            const uint16_t phy_id = group_params->phy_cell_index_list[slot_buff_idx];
+            for(auto* c : aggr_cell_list)
+            {
+                if(c && c->getPhyId() == phy_id)
+                {
+                    cell = c;
+                    break;
+                }
+            }
+        }
+        if(!cell && !aggr_cell_list.empty())
+            cell = aggr_cell_list[0];
+        const float th = cell ? cell->getPbchTheta() : 1.0f;
+        pbch_dyn_data.beta_pss *= th;
+        pbch_dyn_data.beta_sss *= th;
+    }
+
     ssbDynPrms.procModeBmsk = pdctx->getEnableDlCuphyGraphs() ? SSB_PROC_MODE_GRAPHS : SSB_PROC_MODE_STREAMS;
     ssbDynPrms.nCells = group_params->ncells;
     ssbDynPrms.pPerCellSsbDynParams = group_params->pbch_dyn_cell_params.data();

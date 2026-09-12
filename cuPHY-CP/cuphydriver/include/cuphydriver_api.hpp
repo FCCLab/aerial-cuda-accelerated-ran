@@ -221,6 +221,10 @@ static constexpr char CELL_PARAM_NIC[] = "nic";                                 
 static constexpr char CELL_PARAM_GAMMA_DL[] = "gamma_dl";                                      ///< Live DL scale (beta_dl * oam_linear_gain * gamma_dl)
 static constexpr char CELL_PARAM_GAMMA_UL[] = "gamma_ul";                                      ///< Live UL scale (beta_ul * oam_linear_gain * gamma_ul)
 static constexpr char CELL_PARAM_FORCE_THR0[] = "force_thr0";                                  ///< Live PRACH detection threshold (0 = cuPHY default)
+static constexpr char CELL_PARAM_PBCH_THETA[] = "pbch_theta";                                  ///< Live PBCH/SSB generation scale (FAPI_beta * theta)
+static constexpr char CELL_PARAM_CSIRS_THETA[] = "csirs_theta";                                ///< Live CSI-RS generation scale (FAPI_beta * theta)
+static constexpr char CELL_PARAM_PDCCH_THETA[] = "pdcch_theta";                                ///< Live PDCCH generation scale (FAPI_beta * theta)
+static constexpr char CELL_PARAM_PDSCH_THETA[] = "pdsch_theta";                                ///< Live PDSCH generation scale (FAPI_beta * theta)
 
 
 struct nic_cfg

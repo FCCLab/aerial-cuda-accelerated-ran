@@ -30,6 +30,16 @@ using namespace std;
 using namespace cuphy;
 using namespace hdf5hpp;
 
+static Cell* cell_by_phy_id(const std::vector<Cell*>& cells, uint16_t phy_id)
+{
+    for(auto* c : cells)
+    {
+        if(c && c->getPhyId() == phy_id)
+            return c;
+    }
+    return nullptr;
+}
+
 PhyPdcchAggr::PhyPdcchAggr(
     phydriver_handle _pdh,
     GpuDevice*       _gDev,
@@ -199,6 +209,21 @@ int PhyPdcchAggr::setup(const std::vector<Cell *> &aggr_cell_list, const std::ve
 
     dyn_params.pCoresetDynPrm = params->csets_group.csets.data();
     dyn_params.nCells = aggr_cell_list.size();
+
+    for(int idx_cs = 0; idx_cs < dyn_params.nCoresets; idx_cs++) {
+        Cell* cell = cell_by_phy_id(aggr_cell_list, params->phy_cell_index_list[idx_cs]);
+        if(!cell && !aggr_cell_list.empty())
+            cell = aggr_cell_list[0];
+        const float th = cell ? cell->getPdcchTheta() : 1.0f;
+        const auto& coreset = params->csets_group.csets[idx_cs];
+        for(uint32_t d = 0; d < coreset.nDci; ++d) {
+            const uint32_t dci_idx = coreset.dciStartIdx + d;
+            if(dci_idx >= params->csets_group.nDcis)
+                break;
+            params->csets_group.dcis[dci_idx].beta_qam *= th;
+            params->csets_group.dcis[dci_idx].beta_dmrs *= th;
+        }
+    }
 
     // DataIn.pDciInput = params->csets_group.payloads.data();
     for(dci_dyn_idx = 0, dci_in_idx = 0; dci_dyn_idx < params->csets_group.nDcis; dci_dyn_idx++) {
