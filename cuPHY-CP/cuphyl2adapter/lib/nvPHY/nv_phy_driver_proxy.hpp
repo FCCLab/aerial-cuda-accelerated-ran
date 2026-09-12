@@ -157,6 +157,11 @@ public:
      * @return Status code (0 for success, negative for error)
      */
     int l1_cell_update_attenuation(uint16_t mplane_id, float attenuation_dB);
+
+    /**
+     * @brief Get live PRACH force_thr0 (0 = cuPHY default)
+     */
+    float l1_get_prach_force_thr0(uint16_t mplane_id);
     
     /**
      * @brief Update GPS timing synchronization parameters

@@ -274,6 +274,18 @@ int PHYDriverProxy::l1_cell_update_attenuation(uint16_t mplane_id, float attenua
     }
 }
 
+float PHYDriverProxy::l1_get_prach_force_thr0(uint16_t mplane_id)
+{
+    if(driver_ != nullptr)
+    {
+        return ::l1_get_prach_force_thr0(driver_, mplane_id);
+    }
+    else
+    {
+        return 0.0f;
+    }
+}
+
 int PHYDriverProxy::l1_update_gps_alpha_beta(uint64_t alpha,int64_t beta)
 {
     if(driver_ != nullptr)

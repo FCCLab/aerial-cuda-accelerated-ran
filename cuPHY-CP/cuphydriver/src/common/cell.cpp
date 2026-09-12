@@ -78,6 +78,7 @@ Cell::Cell(
     oam_linear_gain        = 1;
     gamma_dl               = 1;
     gamma_ul               = 1;
+    force_thr0             = 0;
     t1a_max_up_ns          = _mplane.t1a_max_up_ns;
     t1a_max_cp_ul_ns       = _mplane.t1a_max_cp_ul_ns;
     t1a_min_cp_ul_ns       = _mplane.t1a_min_cp_ul_ns;
@@ -1416,6 +1417,11 @@ void Cell::setGammaUl(float gamma_ul)
     this->gamma_ul = gamma_ul;
 }
 
+void Cell::setPrachForceThr0(float force_thr0)
+{
+    this->force_thr0 = force_thr0;
+}
+
 float Cell::getGammaDl() const
 {
     return gamma_dl.load();
@@ -1424,6 +1430,11 @@ float Cell::getGammaDl() const
 float Cell::getGammaUl() const
 {
     return gamma_ul.load();
+}
+
+float Cell::getPrachForceThr0() const
+{
+    return force_thr0.load();
 }
 
 float Cell::getBetaUlPowerScaling() const

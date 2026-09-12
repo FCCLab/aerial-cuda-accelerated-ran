@@ -220,6 +220,7 @@ static constexpr char CELL_PARAM_REF_DL[] = "ref_dl";                           
 static constexpr char CELL_PARAM_NIC[] = "nic";                                                ///< Cell parameter key: Network interface card name
 static constexpr char CELL_PARAM_GAMMA_DL[] = "gamma_dl";                                      ///< Live DL scale (beta_dl * oam_linear_gain * gamma_dl)
 static constexpr char CELL_PARAM_GAMMA_UL[] = "gamma_ul";                                      ///< Live UL scale (beta_ul * oam_linear_gain * gamma_ul)
+static constexpr char CELL_PARAM_FORCE_THR0[] = "force_thr0";                                  ///< Live PRACH detection threshold (0 = cuPHY default)
 
 
 struct nic_cfg
@@ -940,6 +941,19 @@ int l1_cell_update_cell_config(phydriver_handle pdh, uint16_t mplane_id, std::un
  * \p 0 on success, -1 otherwise
  */
 int l1_cell_update_attenuation(phydriver_handle pdh, uint16_t mplane_id, float attenuation_dB);
+
+/******************************************************************/ /**
+ * @brief Get live PRACH force_thr0 for a cell
+ *
+ * 0 means use cuPHY's default detection threshold. Values > 0 overwrite that
+ * threshold (higher = less sensitive, fewer false Msg1 detections).
+ *
+ * @param[in] pdh cuPHYDriver handler
+ * @param[in] mplane_id M-plane identifier of the cell
+ *
+ * @return force_thr0 (0 if the cell is missing)
+ */
+float l1_get_prach_force_thr0(phydriver_handle pdh, uint16_t mplane_id);
 
 /******************************************************************/ /**
  * @brief Update GPS timing parameters

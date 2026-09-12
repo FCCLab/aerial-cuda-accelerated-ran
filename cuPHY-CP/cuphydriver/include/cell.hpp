@@ -161,8 +161,10 @@ public:
     void                   setAttenuation_dB(float attenuation_dB); ///< Set signal attenuation in dB
     void                   setGammaDl(float gamma_dl);            ///< Live DL scale (with oam_linear_gain)
     void                   setGammaUl(float gamma_ul);            ///< Live UL scale (with oam_linear_gain)
+    void                   setPrachForceThr0(float force_thr0);   ///< Live PRACH detection threshold (0 = cuPHY default)
     float                  getGammaDl() const;                    ///< Current gamma_dl (default 1)
     float                  getGammaUl() const;                    ///< Current gamma_ul (default 1)
+    float                  getPrachForceThr0() const;             ///< Current force_thr0 (default 0)
     float                  getBetaUlPowerScaling() const;         ///< UL: beta_ul * oam_linear_gain * gamma_ul
     float                  getBetaDlPowerScaling() const;         ///< DL: beta_dl * oam_linear_gain * gamma_dl
     int                    getDlExponent() const;                 ///< DL exponent for block floating point
@@ -638,6 +640,7 @@ private:
     std::atomic<float>    oam_linear_gain;                        ///< Shared OAM linear gain (attenuation)
     std::atomic<float>    gamma_dl;                               ///< Live DL-only scale (default 1)
     std::atomic<float>    gamma_ul;                               ///< Live UL-only scale (default 1)
+    std::atomic<float>    force_thr0;                             ///< Live PRACH detection threshold (0 = cuPHY default)
 
     //////////////////////////////////////////////////////////////////
     /// I/O Buffers - Double/Triple Buffering for Data Flow
