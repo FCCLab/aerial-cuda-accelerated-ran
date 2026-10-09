@@ -25,6 +25,16 @@
 #include "phycsirs_aggr.hpp"
 #define getName(var)  #var
 
+static Cell* cell_by_phy_id(const std::vector<Cell*>& cells, uint16_t phy_id)
+{
+    for(auto* c : cells)
+    {
+        if(c && c->getPhyId() == phy_id)
+            return c;
+    }
+    return nullptr;
+}
+
 void printParameters(const cuphyCsirsRrcDynPrm_t* l2)
 {
 #if 0
@@ -260,6 +270,20 @@ int PhyCsiRsAggr::setup(const std::vector<DLOutputBuffer *>& aggr_dlbuf, const s
     }
     if(dyn_params_num > 0)
     {
+        for(int cell_idx = 0; cell_idx < pparms->nCells; ++cell_idx)
+        {
+            Cell* cell = cell_by_phy_id(aggr_cell_list, pparms->phy_cell_index_list[cell_idx]);
+            if(!cell && !aggr_cell_list.empty())
+                cell = aggr_cell_list[0];
+            const float th = cell ? cell->getCsirsTheta() : 1.0f;
+            const auto& cprm = dyn_params.pCellParam[cell_idx];
+            for(uint8_t j = 0; j < cprm.nRrcParams; ++j)
+            {
+                const uint16_t idx = static_cast<uint16_t>(cprm.rrcParamsOffset + j);
+                if(idx < dyn_params_num)
+                    dyn_params.pRrcDynPrm[idx].beta *= th;
+            }
+        }
         status = cuphySetupCsirsTx(*handle, &dyn_params);
         if(status != CUPHY_STATUS_SUCCESS)
         {

@@ -563,7 +563,6 @@ namespace scf_5g_fapi
 
         rach.occaPrmStatIdx = cell_params.prach_config_.start_ro_index + req.num_ra;
         rach.occaPrmDynIdx = rach_params->nOccasion;
-        rach.force_thr0 = 0.0;
 
         if ( mmimo_enabled && req.beam_index.dig_bf_interfaces != 0){
             rach.nUplinkStreams = req.beam_index.dig_bf_interfaces;
@@ -575,8 +574,9 @@ namespace scf_5g_fapi
 
         nv::PHYDriverProxy& phyDriver = nv::PHYDriverProxy::getInstance();
         auto & mplane_info = phyDriver.getMPlaneConfig(cell_index);
+        rach.force_thr0 = phyDriver.l1_get_prach_force_thr0(mplane_info.mplane_id);
         ru_type ru = mplane_info.ru;
-        NVLOGI_FMT(TAG, "{} PRACH occaPrmStatIdx={} occaPrmDynIdx={}, numRa ={}", __FUNCTION__, rach.occaPrmStatIdx, rach.occaPrmDynIdx, req.num_ra);
+        NVLOGI_FMT(TAG, "{} PRACH occaPrmStatIdx={} occaPrmDynIdx={}, numRa={} force_thr0={:.3f}", __FUNCTION__, rach.occaPrmStatIdx, rach.occaPrmDynIdx, req.num_ra, rach.force_thr0);
         update_fh_params_prach(cell_params, addln_config, req, req.beam_index, cell_cmd, bf_enabled, ru, slot_detail,mmimo_enabled, cell_index);
     }
 

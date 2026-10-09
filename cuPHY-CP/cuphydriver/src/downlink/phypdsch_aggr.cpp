@@ -28,6 +28,65 @@
 
 #define getName(var)  #var
 
+static Cell* cell_by_phy_id(const std::vector<Cell*>& cells, uint16_t phy_id)
+{
+    for(auto* c : cells)
+    {
+        if(c && c->getPhyId() == phy_id)
+            return c;
+    }
+    return nullptr;
+}
+
+// FAPI adapter overwrites betas each slot; multiply once here so cuphy IQ = FAPI_beta * theta.
+static void apply_dl_channel_theta(cuphyPdschCellGrpDynPrm_t* grp,
+    const cuphyPdschStatPrms_t& stat,
+    const std::vector<Cell*>& cells)
+{
+    if(!grp)
+        return;
+
+    if(grp->pUePrms)
+    {
+        for(uint16_t u = 0; u < grp->nUes; ++u)
+        {
+            auto& ue = grp->pUePrms[u];
+            Cell* cell = nullptr;
+            if(ue.pUeGrpPrm && ue.pUeGrpPrm->pCellPrm && stat.pCellStatPrms)
+            {
+                const uint16_t stat_idx = ue.pUeGrpPrm->pCellPrm->cellPrmStatIdx;
+                if(stat_idx < stat.nCells)
+                    cell = cell_by_phy_id(cells, stat.pCellStatPrms[stat_idx].phyCellId);
+            }
+            if(!cell && !cells.empty())
+                cell = cells[0];
+            const float th = cell ? cell->getPdschTheta() : 1.0f;
+            ue.beta_qam *= th;
+            ue.beta_dmrs *= th;
+        }
+    }
+
+    if(!grp->pCellPrms || !grp->pCsiRsPrms || !stat.pCellStatPrms)
+        return;
+
+    for(uint16_t i = 0; i < grp->nCells; ++i)
+    {
+        const auto& cprm = grp->pCellPrms[i];
+        Cell* cell = nullptr;
+        if(cprm.cellPrmStatIdx < stat.nCells)
+            cell = cell_by_phy_id(cells, stat.pCellStatPrms[cprm.cellPrmStatIdx].phyCellId);
+        if(!cell && !cells.empty())
+            cell = cells[0];
+        const float th = cell ? cell->getCsirsTheta() : 1.0f;
+        for(uint16_t j = 0; j < cprm.nCsiRsPrms; ++j)
+        {
+            const uint16_t idx = static_cast<uint16_t>(cprm.csiRsPrmsOffset + j);
+            if(idx < grp->nCsiRsPrms)
+                grp->pCsiRsPrms[idx].beta *= th;
+        }
+    }
+}
+
 // nvlog versions of the cuphy::print_pdsch_static, cuphy::print_pdsch_dynamic, and cuphy::print_pdsch_dynamic_cell_group functions
 // to print cuPHY PDSCH static and dynamic parameters.
 // printPdschDynPrmsAggr calls printPdschDynamicCellGroupAggr under the hood too.
@@ -301,6 +360,7 @@ int PhyPdschAggr::setup(
         }
         CUDA_CHECK_PHYDRIVER(cudaEventRecord(start_setup, s_channel));
         //cuphy::print_pdsch_dynamic(&dyn_params);
+        apply_dl_channel_theta(const_cast<cuphyPdschCellGrpDynPrm_t*>(dyn_params.pCellGrpDynPrm), static_params, aggr_cell_list);
         status = cuphySetupPdschTx(handle, &dyn_params, nullptr); // cuPHY should not throw any exception. Can also add try/catch if need be.
         if(status != CUPHY_STATUS_SUCCESS)
         {

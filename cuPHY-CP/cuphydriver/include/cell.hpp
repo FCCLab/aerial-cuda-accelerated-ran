@@ -159,8 +159,22 @@ public:
     int                    getFsDlOffset() const;                 ///< DL full-scale shift offset (power-of-2 scaling for dynamic range)
     int                    getFsUlOffset() const;                 ///< UL full-scale shift offset (power-of-2 scaling for dynamic range)
     void                   setAttenuation_dB(float attenuation_dB); ///< Set signal attenuation in dB
-    float                  getBetaUlPowerScaling() const;         ///< UL power scaling factor (beta)
-    float                  getBetaDlPowerScaling() const;         ///< DL power scaling factor (beta)
+    void                   setGammaDl(float gamma_dl);            ///< Live DL scale (with oam_linear_gain)
+    void                   setGammaUl(float gamma_ul);            ///< Live UL scale (with oam_linear_gain)
+    void                   setPrachForceThr0(float force_thr0);   ///< Live PRACH detection threshold (0 = cuPHY default)
+    void                   setPbchTheta(float theta);             ///< Live PBCH/SSB generation scale
+    void                   setCsirsTheta(float theta);            ///< Live CSI-RS generation scale
+    void                   setPdcchTheta(float theta);            ///< Live PDCCH generation scale
+    void                   setPdschTheta(float theta);            ///< Live PDSCH generation scale
+    float                  getGammaDl() const;                    ///< Current gamma_dl (default 1)
+    float                  getGammaUl() const;                    ///< Current gamma_ul (default 1)
+    float                  getPrachForceThr0() const;             ///< Current force_thr0 (default 0)
+    float                  getPbchTheta() const;                  ///< Current pbch_theta (default 1)
+    float                  getCsirsTheta() const;                 ///< Current csirs_theta (default 1)
+    float                  getPdcchTheta() const;                 ///< Current pdcch_theta (default 1)
+    float                  getPdschTheta() const;                 ///< Current pdsch_theta (default 1)
+    float                  getBetaUlPowerScaling() const;         ///< UL: beta_ul * oam_linear_gain * gamma_ul
+    float                  getBetaDlPowerScaling() const;         ///< DL: beta_dl * oam_linear_gain * gamma_dl
     int                    getDlExponent() const;                 ///< DL exponent for block floating point
     void                   setDlExponent(int exp_dl);             ///< Set DL exponent
     void                   setUlExponent(int exp_ul);             ///< Set UL exponent
@@ -631,7 +645,14 @@ private:
     int                   max_amp_ul;                             ///< UL maximum amplitude (prevents saturation)
     float                 beta_dl;                                ///< DL power scaling factor
     float                 beta_ul;                                ///< UL power scaling factor
-    std::atomic<float>    oam_linear_gain;                        ///< OAM (Operations, Administration, Maintenance) linear gain
+    std::atomic<float>    oam_linear_gain;                        ///< Shared OAM linear gain (attenuation)
+    std::atomic<float>    gamma_dl;                               ///< Live DL-only scale (default 1)
+    std::atomic<float>    gamma_ul;                               ///< Live UL-only scale (default 1)
+    std::atomic<float>    force_thr0;                             ///< Live PRACH detection threshold (0 = cuPHY default)
+    std::atomic<float>    pbch_theta;                             ///< Live PBCH/SSB FAPI-beta scale (default 1)
+    std::atomic<float>    csirs_theta;                            ///< Live CSI-RS FAPI-beta scale (default 1)
+    std::atomic<float>    pdcch_theta;                            ///< Live PDCCH FAPI-beta scale (default 1)
+    std::atomic<float>    pdsch_theta;                            ///< Live PDSCH FAPI-beta scale (default 1)
 
     //////////////////////////////////////////////////////////////////
     /// I/O Buffers - Double/Triple Buffering for Data Flow

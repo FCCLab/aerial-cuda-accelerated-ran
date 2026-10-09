@@ -76,6 +76,13 @@ Cell::Cell(
     beta_dl                = 1;
     beta_ul                = 1;
     oam_linear_gain        = 1;
+    gamma_dl               = 1;
+    gamma_ul               = 1;
+    force_thr0             = 0;
+    pbch_theta             = 1;
+    csirs_theta            = 1;
+    pdcch_theta            = 1;
+    pdsch_theta            = 1;
     t1a_max_up_ns          = _mplane.t1a_max_up_ns;
     t1a_max_cp_ul_ns       = _mplane.t1a_max_cp_ul_ns;
     t1a_min_cp_ul_ns       = _mplane.t1a_min_cp_ul_ns;
@@ -1404,14 +1411,84 @@ void Cell::setAttenuation_dB(float attenuation_dB)
     oam_linear_gain = pow(10.0,-attenuation_dB/20.0);
 }
 
+void Cell::setGammaDl(float gamma_dl)
+{
+    this->gamma_dl = gamma_dl;
+}
+
+void Cell::setGammaUl(float gamma_ul)
+{
+    this->gamma_ul = gamma_ul;
+}
+
+void Cell::setPrachForceThr0(float force_thr0)
+{
+    this->force_thr0 = force_thr0;
+}
+
+void Cell::setPbchTheta(float theta)
+{
+    this->pbch_theta = theta;
+}
+
+void Cell::setCsirsTheta(float theta)
+{
+    this->csirs_theta = theta;
+}
+
+void Cell::setPdcchTheta(float theta)
+{
+    this->pdcch_theta = theta;
+}
+
+void Cell::setPdschTheta(float theta)
+{
+    this->pdsch_theta = theta;
+}
+
+float Cell::getGammaDl() const
+{
+    return gamma_dl.load();
+}
+
+float Cell::getGammaUl() const
+{
+    return gamma_ul.load();
+}
+
+float Cell::getPrachForceThr0() const
+{
+    return force_thr0.load();
+}
+
+float Cell::getPbchTheta() const
+{
+    return pbch_theta.load();
+}
+
+float Cell::getCsirsTheta() const
+{
+    return csirs_theta.load();
+}
+
+float Cell::getPdcchTheta() const
+{
+    return pdcch_theta.load();
+}
+
+float Cell::getPdschTheta() const
+{
+    return pdsch_theta.load();
+}
+
 float Cell::getBetaUlPowerScaling() const
 {
-    return beta_ul * oam_linear_gain;
+    return beta_ul * oam_linear_gain * gamma_ul;
 }
 
 float Cell::getBetaDlPowerScaling() const
 {
-    return beta_dl * oam_linear_gain;
+    return beta_dl * oam_linear_gain * gamma_dl;
 }
 
 std::string Cell::getNicName() const
