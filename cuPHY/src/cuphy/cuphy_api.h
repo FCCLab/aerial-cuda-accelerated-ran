@@ -322,7 +322,8 @@ typedef struct _cuphyPuschCellDynPrm
 {
     uint16_t cellPrmStatIdx; /// Index to cell-static parameter information
     uint16_t cellPrmDynIdx;  /// Index to cell-dynamic parameter information
-    uint16_t slotNum;
+    uint16_t slotNum;        /// Slot index within the system frame. Value: 0->159 (numerology dependent; 0->19 at 30 kHz)
+    uint16_t sfn;            /// System frame number. Value: 0->1023
 
 } cuphyPuschCellDynPrm_t;
 

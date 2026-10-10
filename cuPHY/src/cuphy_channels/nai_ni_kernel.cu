@@ -1,7 +1,7 @@
 /*
  * NAI NI grid policy:
  *   1) Copy full RX slot into NI (PRACH/PUCCH/SRS/unallocated PRBs stay as received interference).
- *   2) Inside each PUSCH UE rectangle only: ni = rx - H*tx (PdschTx reconstruction).
+ *   2) Inside the PUSCH rectangle only: ni = rx - H*tx (PdschTx reconstruction).
  * H layout matches cuPHY tInfoHEst: (N_BS_ANTS, N_LAYERS, NF_alloc, NH).
  */
 #include <cuda_fp16.h>

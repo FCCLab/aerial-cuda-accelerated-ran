@@ -5347,6 +5347,12 @@ bool PuschRx::resolveResgridRxSlot(int32_t cellIdxMq, ResgridRxSlotView& out) co
 
 void PuschRx::enqueueResgridDevToMq(cudaStream_t cuStrm, cuphy_mq_channel ch, const void* dev_payload, const ResgridRxSlotView& slot) const
 {
+    uint16_t sfn = 0;
+    uint16_t slot_in_sfn = 0;
+    if (m_cuphyPuschCellGrpDynPrm.nCells > 0 && m_cuphyPuschCellGrpDynPrm.pCellPrms) {
+        sfn = m_cuphyPuschCellGrpDynPrm.pCellPrms[0].sfn;
+        slot_in_sfn = m_cuphyPuschCellGrpDynPrm.pCellPrms[0].slotNum;
+    }
     cuphy_mq_enqueue_from_device(ch,
         cuStrm,
         const_cast<void*>(dev_payload),
@@ -5358,7 +5364,9 @@ void PuschRx::enqueueResgridDevToMq(cudaStream_t cuStrm, cuphy_mq_channel ch, co
         slot.ul_prb_cfg,
         slot.s0,
         slot.s1,
-        slot.s2);
+        slot.s2,
+        sfn,
+        slot_in_sfn);
 }
 
 void PuschRx::enqueueResgridMqExportsAfterFullSlotWork(cudaStream_t cuStrm)

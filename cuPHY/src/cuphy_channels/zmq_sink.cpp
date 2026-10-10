@@ -4,7 +4,7 @@
  * The bind value is a full address, used as given: ipc:///tmp/resgrid_nai.ipc or tcp://127.0.0.1:5556.
  *
  * Each frame is one multipart message:
- *   part 1: text topic/metadata, e.g. "resgrid_nai seq=1 prb=133 symbols=14 bytes=14896"
+ *   part 1: text topic/metadata, e.g. "resgrid_nai seq=1 prb=133 symbols=14 bytes=14896 sfn=512 slot=7"
  *   part 2: raw float32 IQ
  * A PUB socket drops the message when no subscriber is connected. Sends are non-blocking.
  */
@@ -66,6 +66,8 @@ struct PendingJob {
     int el_stride0{};
     int el_stride1{};
     int el_stride2{};
+    uint16_t sfn{};
+    uint16_t slot_in_sfn{};
 };
 
 inline int layout_offset_elems(int i0, int i1, int i2, int s0, int s1, int s2)
@@ -305,18 +307,20 @@ struct MqChannel {
 
     /** 0 sent, 1 discarded (queue full), -1 transport error.
      *  With no subscriber a PUB send still returns success and ZeroMQ drops the message. */
-    int mq_send_logical_frame(const void* data, size_t len, uint32_t frame_seq, uint16_t prb, uint16_t symbols)
+    int mq_send_logical_frame(const void* data, size_t len, uint32_t frame_seq, uint16_t prb, uint16_t symbols, uint16_t sfn, uint16_t slot_in_sfn)
     {
         if (!zmq_pub) return -1;
         char meta[192];
         const int meta_n = std::snprintf(meta,
             sizeof(meta),
-            "%s seq=%u prb=%u symbols=%u bytes=%zu",
+            "%s seq=%u prb=%u symbols=%u bytes=%zu sfn=%u slot=%u",
             topic(),
             frame_seq,
             static_cast<unsigned>(prb),
             static_cast<unsigned>(symbols),
-            len);
+            len,
+            static_cast<unsigned>(sfn),
+            static_cast<unsigned>(slot_in_sfn));
         if (meta_n <= 0) return -1;
         try {
             zmq::message_t header_msg(meta, static_cast<size_t>(meta_n));
@@ -457,7 +461,7 @@ struct MqChannel {
                         frames_dropped.fetch_add(1, std::memory_order_relaxed);
                     } else {
                         const uint32_t fs = mq_frame_seq.fetch_add(1u, std::memory_order_relaxed) + 1u;
-                        const int sent = mq_send_logical_frame(plot_frame.data(), wire_bytes, fs, prb_tag, sym_tag);
+                        const int sent = mq_send_logical_frame(plot_frame.data(), wire_bytes, fs, prb_tag, sym_tag, j.sfn, j.slot_in_sfn);
                         if (sent == 0) {
                             frames_written.fetch_add(1, std::memory_order_relaxed);
                         } else if (sent == 1) {
@@ -516,7 +520,9 @@ struct MqChannel {
         int ul_prb_config,
         int el_stride0,
         int el_stride1,
-        int el_stride2)
+        int el_stride2,
+        uint16_t sfn,
+        uint16_t slot_in_sfn)
     {
 #if !defined(__linux__)
         static std::atomic<int> nflog{0};
@@ -534,6 +540,8 @@ struct MqChannel {
         (void)el_stride0;
         (void)el_stride1;
         (void)el_stride2;
+        (void)sfn;
+        (void)slot_in_sfn;
         return;
 #else
         if (!path_ok()) {
@@ -662,6 +670,8 @@ struct MqChannel {
             job.el_stride0 = jr0;
             job.el_stride1 = jr1;
             job.el_stride2 = jr2;
+            job.sfn = sfn;
+            job.slot_in_sfn = slot_in_sfn;
             ready_for_worker = true;
         }
         cv.notify_one();
@@ -704,7 +714,9 @@ void cuphy_mq_enqueue_from_device(cuphy_mq_channel ch,
     int ul_prb_config,
     int el_stride0,
     int el_stride1,
-    int el_stride2)
+    int el_stride2,
+    uint16_t sfn,
+    uint16_t slot_in_sfn)
 {
     if (!cuphy_mq_export_enabled(ch)) return;
 #if !defined(__linux__)
@@ -725,10 +737,10 @@ void cuphy_mq_enqueue_from_device(cuphy_mq_channel ch,
                 p ? p : "(unset)");
         }
         g_nai.enqueue(
-            stream, dev_src, nbytes, dim0, dim1, dim2, fp16, ul_prb_config, el_stride0, el_stride1, el_stride2);
+            stream, dev_src, nbytes, dim0, dim1, dim2, fp16, ul_prb_config, el_stride0, el_stride1, el_stride2, sfn, slot_in_sfn);
     } else {
         g_rx.enqueue(
-            stream, dev_src, nbytes, dim0, dim1, dim2, fp16, ul_prb_config, el_stride0, el_stride1, el_stride2);
+            stream, dev_src, nbytes, dim0, dim1, dim2, fp16, ul_prb_config, el_stride0, el_stride1, el_stride2, sfn, slot_in_sfn);
     }
 #endif
 }

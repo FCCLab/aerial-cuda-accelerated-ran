@@ -29,6 +29,8 @@ void cuphy_mq_enqueue_from_device(cuphy_mq_channel ch,
     int ul_prb_config,
     int el_stride0,
     int el_stride1,
-    int el_stride2);
+    int el_stride2,
+    uint16_t sfn,
+    uint16_t slot_in_sfn);
 
 void cuphy_mq_shutdown();

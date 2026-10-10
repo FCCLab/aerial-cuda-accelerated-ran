@@ -156,6 +156,7 @@ namespace scf_5g_fapi
         {
             auto& cell_info = info->cell_dyn_info[info->cell_grp_info.nCells-1];
             cell_info.slotNum = ((staticPuschSlotNum > -1)? staticPuschSlotNum : cell_grp_cmd->slot.slot_3gpp.slot_);
+            cell_info.sfn               = cell_grp_cmd->slot.slot_3gpp.sfn_;
             cell_info.cellPrmDynIdx     = info->cell_grp_info.nCells-1;
             cell_info.cellPrmStatIdx    = cell_stat_prm_idx;
             //NVLOGD_FMT(TAG, "PUSCH new cell cell_index {} cellPrmStatIdx={} cellPrmDynIdx={}", cell_index, cell_stat_prm_idx,  cell_info.cellPrmDynIdx);
