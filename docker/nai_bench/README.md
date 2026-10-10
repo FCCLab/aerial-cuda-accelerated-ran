@@ -136,7 +136,7 @@ You may also see `[NAI dbg ...]` lines from cuPHY debug prints in `nai_ni_kernel
 - Inter-slot pipelining or dual-stream overlap
 - Real UE TB bits from the scheduler (warmup TB only)
 
-For end-to-end NAI in the live stack, enable `CUPHY_NAI_MQ_ENABLE=1` and `PUSCH_PROC_MODE_FULL_SLOT_GRAPHS` in `cuphycontroller`.
+For end-to-end NAI in the live stack, enable `CUPHY_NAI_ZMQ_ENABLE=1` and `PUSCH_PROC_MODE_FULL_SLOT_GRAPHS` in `cuphycontroller`.
 
 ## Layout
 

@@ -1,6 +1,7 @@
 /*
- * Resgrid plotter POSIX mq export (RX and NAI). RGMC v2 chunks, raw float32 IQ raster.
- * See mq_export.hpp for per-channel enable env vars and queue paths.
+ * Resgrid plotter ZeroMQ PUB export (RX and NAI).
+ * Multipart: text topic/metadata, then raw float32 IQ. Dropped when unread.
+ * See zmq_export.hpp for per-channel enable env vars and endpoints.
  */
 #pragma once
 
@@ -8,7 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "mq_export.hpp"
+#include "zmq_export.hpp"
 
 enum class cuphy_mq_channel : uint8_t { rx = 0, nai = 1 };
 

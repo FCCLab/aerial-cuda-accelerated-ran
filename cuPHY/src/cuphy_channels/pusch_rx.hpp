@@ -27,7 +27,7 @@
 #include "ldpc/ldpc_api.hpp"
 #include "cuphy_hdf5.hpp"
 #include "cuphy.hpp"
-#include "mq_sink.hpp"
+#include "zmq_sink.hpp"
 #include "tensor_desc.hpp"
 #include "ch_est/IModule.hpp"
 #include "ch_est/ch_est_settings.hpp"

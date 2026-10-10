@@ -1,10 +1,16 @@
 /*
- * RX and NAI resgrid plotter export: POSIX mq, RGMC v2 chunks, raw float32 IQ raster.
- * RX: CUPHY_RX_MQ_ENABLE / CUPHY_RX_MQ_PATH.  NAI: CUPHY_NAI_MQ_ENABLE / CUPHY_NAI_MQ_PATH.
+ * RX and NAI resgrid plotter export over ZeroMQ PUB (cppzmq).
+ * RX: CUPHY_RX_ZMQ_ENABLE / CUPHY_RX_ZMQ_BIND.  NAI: CUPHY_NAI_ZMQ_ENABLE / CUPHY_NAI_ZMQ_BIND.
+ * The bind value is a full address, used as given: ipc:///tmp/resgrid_nai.ipc or tcp://127.0.0.1:5556.
+ *
+ * Each frame is one multipart message:
+ *   part 1: text topic/metadata, e.g. "resgrid_nai seq=1 prb=133 symbols=14 bytes=14896"
+ *   part 2: raw float32 IQ
+ * A PUB socket drops the message when no subscriber is connected. Sends are non-blocking.
  */
 
-#include "mq_sink.hpp"
-#include "mq_export.hpp"
+#include "zmq_sink.hpp"
+#include "zmq_export.hpp"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -16,6 +22,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <signal.h>
 #include <string>
@@ -25,8 +32,9 @@
 #include <errno.h>
 
 #if defined(__linux__)
-#include <fcntl.h>
-#include <mqueue.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <zmq.hpp>
 #endif
 
 namespace {
@@ -178,46 +186,36 @@ void convert_float2_to_plotter_frame(const float2* src,
 }
 
 #if defined(__linux__)
-struct ResgridMqChunkHdr {
-    uint32_t magic;
-    uint32_t version;
-    uint32_t frame_seq;
-    uint16_t chunk_idx;
-    uint16_t n_chunks;
-    uint32_t logical_len;
-    uint32_t byte_off;
-    uint16_t prb;
-    uint16_t symbols;
-};
-static constexpr uint32_t kResgridMqChunkMagic = 0x52474D43u;
-static constexpr uint32_t kResgridMqChunkVersion = 2u;
-
-static long read_proc_long_mq(const char* path, long fallback)
+/** Bind address is used unchanged. Only ipc://, tcp://, and inproc:// are accepted. */
+static std::string zmq_endpoint_from_path(const char* path)
 {
-    FILE* f = std::fopen(path, "re");
-    if (!f) return fallback;
-    long v = fallback;
-    if (std::fscanf(f, "%ld", &v) != 1) v = fallback;
-    std::fclose(f);
-    return v;
+    if (!cuphy_mq_export::is_zmq_endpoint(path)) return {};
+    return path;
 }
 
-static long effective_mq_msgsize_fallback()
+static std::string ipc_file_from_endpoint(const std::string& endpoint)
 {
-    const char* ev = std::getenv("RESGRID_MQ_MSGSIZE");
+    if (endpoint.rfind("ipc://", 0) != 0) return {};
+    return endpoint.substr(6);
+}
+
+static int zmq_sndhwm()
+{
+    int v = 1;
+    const char* ev = std::getenv(RESGRID_ZMQ_SNDHWM_ENV);
+    if (!ev || !ev[0]) ev = std::getenv("RESGRID_MQ_MAXMSG");
     if (ev && ev[0]) {
         char* end = nullptr;
-        long v = std::strtol(ev, &end, 10);
-        if (end != ev && v >= 256) return v;
+        const long parsed = std::strtol(ev, &end, 10);
+        if (end != ev && parsed >= 1) v = static_cast<int>(std::min(parsed, 64L));
     }
-    const long sysmax = read_proc_long_mq("/proc/sys/fs/mqueue/msgsize_max", 8192);
-    return sysmax > 0 ? sysmax : 8192;
+    return v;
 }
 #endif
 
 enum class MqChannelKind { kRx, kNai };
 
-/** One POSIX mq export path (RX or NAI); separate worker thread so channels do not block each other. */
+/** One ZeroMQ PUB export (RX or NAI); separate worker thread so channels do not block each other. */
 struct MqChannel {
     const char*   tag;
     MqChannelKind kind;
@@ -239,11 +237,11 @@ struct MqChannel {
     bool path_ok() const { return false; }
     void close_mq_peer() {}
     void open_mq_if_needed() {}
-    bool mq_send_logical_frame(const void*, size_t, uint32_t, uint16_t, uint16_t) { return false; }
+    int mq_send_logical_frame(const void*, size_t, uint32_t, uint16_t, uint16_t) { return -1; }
 #else
-    mqd_t mq_wr = (mqd_t)-1;
-    long mq_msgsize_cap = 8192;
-    std::string mq_path;
+    std::unique_ptr<zmq::context_t> zmq_ctx;
+    std::unique_ptr<zmq::socket_t> zmq_pub;
+    std::string zmq_endpoint;
     std::atomic<uint64_t> mq_reconnects{0};
     std::atomic<uint32_t> mq_frame_seq{0};
 
@@ -258,80 +256,83 @@ struct MqChannel {
         return (kind == MqChannelKind::kRx) ? cuphy_mq_export::rx_mq_path() : cuphy_mq_export::nai_mq_path();
     }
 
+    const char* topic() const
+    {
+        return (kind == MqChannelKind::kRx) ? "resgrid_rx" : "resgrid_nai";
+    }
+
     void close_mq_peer()
     {
-        if (mq_wr != (mqd_t)-1) {
-            (void)mq_close(mq_wr);
-            mq_wr = (mqd_t)-1;
-        }
-        mq_msgsize_cap = 8192;
+        zmq_pub.reset();
+        zmq_ctx.reset();
     }
 
     void open_mq_if_needed()
     {
-        if (mq_wr != (mqd_t)-1) return;
+        if (zmq_pub) return;
         const char* name = mq_path_name();
-        if (!name || name[0] != '/') return;
-        mq_path = name;
-        const mqd_t m = mq_open(name, O_WRONLY);
-        if ((int)m < 0) {
-            if (errno != ENOENT) {
-                static std::atomic<int> log_once{0};
-                if (log_once.fetch_add(1) < 4) {
-                    std::fprintf(stderr, "%s: mq_open(%s): %s\n", tag, name, std::strerror(errno));
-                }
+        zmq_endpoint = zmq_endpoint_from_path(name);
+        if (zmq_endpoint.empty()) return;
+
+        const std::string ipc_file = ipc_file_from_endpoint(zmq_endpoint);
+        if (!ipc_file.empty()) (void)unlink(ipc_file.c_str());
+
+        try {
+            zmq_ctx = std::make_unique<zmq::context_t>(1);
+            zmq_pub = std::make_unique<zmq::socket_t>(*zmq_ctx, zmq::socket_type::pub);
+            const int hwm = zmq_sndhwm();
+            zmq_pub->set(zmq::sockopt::sndhwm, hwm);
+            zmq_pub->set(zmq::sockopt::linger, 0);
+            zmq_pub->bind(zmq_endpoint);
+            if (!ipc_file.empty()) (void)chmod(ipc_file.c_str(), 0666);
+            static std::atomic<int> oklog{0};
+            if (oklog.fetch_add(1) < 3) {
+                std::fprintf(stderr,
+                    "%s: ZeroMQ PUB bound %s topic=%s (sndhwm=%d; multipart header+IQ, drop when unread)\n",
+                    tag,
+                    zmq_endpoint.c_str(),
+                    topic(),
+                    hwm);
             }
-            return;
-        }
-        mq_attr attr {};
-        if (mq_getattr(m, &attr) == 0 && attr.mq_msgsize > 0)
-            mq_msgsize_cap = attr.mq_msgsize;
-        else
-            mq_msgsize_cap = effective_mq_msgsize_fallback();
-        mq_wr = m;
-        static std::atomic<int> oklog{0};
-        if (oklog.fetch_add(1) < 3) {
-            std::fprintf(stderr, "%s: writer connected to %s (msgsize_cap=%ld)\n", tag, mq_path.c_str(), mq_msgsize_cap);
+        } catch (const zmq::error_t& e) {
+            static std::atomic<int> log_once{0};
+            if (log_once.fetch_add(1) < 4) {
+                std::fprintf(stderr, "%s: zmq bind %s failed: %s\n", tag, zmq_endpoint.c_str(), e.what());
+            }
+            close_mq_peer();
         }
     }
 
-    bool mq_send_logical_frame(const void* data, size_t len, uint32_t frame_seq, uint16_t prb, uint16_t symbols)
+    /** 0 sent, 1 discarded (queue full), -1 transport error.
+     *  With no subscriber a PUB send still returns success and ZeroMQ drops the message. */
+    int mq_send_logical_frame(const void* data, size_t len, uint32_t frame_seq, uint16_t prb, uint16_t symbols)
     {
-        if (mq_wr == (mqd_t)-1) return false;
-        const size_t hdr_sz = sizeof(ResgridMqChunkHdr);
-        if ((size_t)mq_msgsize_cap <= hdr_sz) {
-            static std::atomic<int> caplog{0};
-            if (caplog.fetch_add(1) < 2) {
-                std::fprintf(stderr, "%s: mq_msgsize_cap too small (%ld)\n", tag, mq_msgsize_cap);
+        if (!zmq_pub) return -1;
+        char meta[192];
+        const int meta_n = std::snprintf(meta,
+            sizeof(meta),
+            "%s seq=%u prb=%u symbols=%u bytes=%zu",
+            topic(),
+            frame_seq,
+            static_cast<unsigned>(prb),
+            static_cast<unsigned>(symbols),
+            len);
+        if (meta_n <= 0) return -1;
+        try {
+            zmq::message_t header_msg(meta, static_cast<size_t>(meta_n));
+            zmq::message_t body_msg(data, len);
+            const auto sent_hdr = zmq_pub->send(header_msg, zmq::send_flags::sndmore | zmq::send_flags::dontwait);
+            if (!sent_hdr) return (zmq_errno() == EAGAIN) ? 1 : -1;
+            const auto sent_body = zmq_pub->send(body_msg, zmq::send_flags::dontwait);
+            if (!sent_body) return -1;
+            return 0;
+        } catch (const zmq::error_t& e) {
+            static std::atomic<int> sendlog{0};
+            if (sendlog.fetch_add(1) < 4) {
+                std::fprintf(stderr, "%s: zmq send failed: %s\n", tag, e.what());
             }
-            return false;
+            return -1;
         }
-        const size_t chunk_cap = (size_t)mq_msgsize_cap - hdr_sz;
-        const auto* p = reinterpret_cast<const uint8_t*>(data);
-        const uint32_t n_chunks_u32 = len == 0 ? 1u : (uint32_t)((len + chunk_cap - 1u) / chunk_cap);
-        const uint16_t n_chunks = (uint16_t)std::min<uint32_t>(n_chunks_u32, 65535u);
-        if ((uint32_t)n_chunks != n_chunks_u32) return false;
-        size_t off = 0;
-        for (uint16_t ci = 0; ci < n_chunks; ++ci) {
-            const size_t remain = len - off;
-            const size_t take = std::min(chunk_cap, remain);
-            ResgridMqChunkHdr h {};
-            h.magic = kResgridMqChunkMagic;
-            h.version = kResgridMqChunkVersion;
-            h.frame_seq = frame_seq;
-            h.chunk_idx = ci;
-            h.n_chunks = n_chunks;
-            h.logical_len = (uint32_t)len;
-            h.byte_off = (uint32_t)off;
-            h.prb = prb;
-            h.symbols = symbols;
-            std::vector<uint8_t> msg(hdr_sz + take);
-            std::memcpy(msg.data(), &h, hdr_sz);
-            if (take) std::memcpy(msg.data() + hdr_sz, p + off, take);
-            if (mq_send(mq_wr, reinterpret_cast<const char*>(msg.data()), msg.size(), 0) != 0) return false;
-            off += take;
-        }
-        return true;
     }
 #endif /* __linux__ */
 
@@ -452,31 +453,34 @@ struct MqChannel {
                     const uint16_t sym_tag = static_cast<uint16_t>(std::min(out_sym, 65535));
 
                     open_mq_if_needed();
-                    if (mq_wr == (mqd_t)-1) {
+                    if (!zmq_pub) {
                         frames_dropped.fetch_add(1, std::memory_order_relaxed);
                     } else {
                         const uint32_t fs = mq_frame_seq.fetch_add(1u, std::memory_order_relaxed) + 1u;
-                        if (!mq_send_logical_frame(plot_frame.data(), wire_bytes, fs, prb_tag, sym_tag)) {
-                            const int werr = errno;
+                        const int sent = mq_send_logical_frame(plot_frame.data(), wire_bytes, fs, prb_tag, sym_tag);
+                        if (sent == 0) {
+                            frames_written.fetch_add(1, std::memory_order_relaxed);
+                        } else if (sent == 1) {
+                            frames_dropped.fetch_add(1, std::memory_order_relaxed);
+                        } else {
+                            const int werr = zmq_errno();
                             close_mq_peer();
                             mq_reconnects.fetch_add(1, std::memory_order_relaxed);
                             static std::atomic<int> mqwlog{0};
                             if (mqwlog.fetch_add(1) < 8) {
                                 std::fprintf(stderr,
-                                    "%s: mq_send failed (%s); closed (reconnects=%llu), will reopen\n",
+                                    "%s: zmq_send failed (%s); closed (reconnects=%llu), will reopen\n",
                                     tag,
-                                    std::strerror(werr),
+                                    zmq_strerror(werr),
                                     static_cast<unsigned long long>(mq_reconnects.load(std::memory_order_relaxed)));
                             }
                             frames_dropped.fetch_add(1, std::memory_order_relaxed);
-                        } else {
-                            frames_written.fetch_add(1, std::memory_order_relaxed);
                         }
                     }
 #else
                     static std::atomic<int> nlinux{0};
                     if (nlinux.fetch_add(1) < 2) {
-                        std::fprintf(stderr, "%s: POSIX mq export is Linux-only; build for Linux to send frames\n", tag);
+                        std::fprintf(stderr, "%s: ZeroMQ export is Linux-only; build for Linux to send frames\n", tag);
                     }
                     frames_dropped.fetch_add(1, std::memory_order_relaxed);
 #endif
@@ -517,7 +521,7 @@ struct MqChannel {
 #if !defined(__linux__)
         static std::atomic<int> nflog{0};
         if (nflog.fetch_add(1) < 2) {
-            std::fprintf(stderr, "%s: POSIX mq export is Linux-only\n", tag);
+            std::fprintf(stderr, "%s: ZeroMQ export is Linux-only\n", tag);
         }
         (void)stream;
         (void)dev_src;
@@ -537,16 +541,16 @@ struct MqChannel {
             if (cfglog.fetch_add(1) < 4) {
                 if (kind == MqChannelKind::kRx) {
                     std::fprintf(stderr,
-                        "%s: set CUPHY_RX_MQ_PATH or CUDA_IQ_MQ_PATH to a name starting with / "
-                        "when %s is set; skipping export\n",
+                        "%s: set %s to ipc:// or tcp:// when %s is set; skipping export\n",
                         tag,
-                        CUPHY_RX_MQ_ENABLE_ENV);
+                        CUPHY_RX_ZMQ_BIND_ENV,
+                        CUPHY_RX_ZMQ_ENABLE_ENV);
                 } else {
                     std::fprintf(stderr,
-                        "%s: set %s to a name starting with / when %s is set; skipping export\n",
+                        "%s: set %s to ipc:// or tcp:// when %s is set; skipping export\n",
                         tag,
-                        CUPHY_NAI_MQ_PATH_ENV,
-                        CUPHY_NAI_MQ_ENABLE_ENV);
+                        CUPHY_NAI_ZMQ_BIND_ENV,
+                        CUPHY_NAI_ZMQ_ENABLE_ENV);
                 }
             }
             return;
@@ -684,8 +688,8 @@ struct MqChannel {
     }
 };
 
-static MqChannel g_rx{"cuphy_rx_mq", MqChannelKind::kRx};
-static MqChannel g_nai{"cuphy_nai_mq", MqChannelKind::kNai};
+static MqChannel g_rx{"cuphy_rx_zmq", MqChannelKind::kRx};
+static MqChannel g_nai{"cuphy_nai_zmq", MqChannelKind::kNai};
 
 } // namespace
 
@@ -706,8 +710,8 @@ void cuphy_mq_enqueue_from_device(cuphy_mq_channel ch,
 #if !defined(__linux__)
     static std::atomic<int> nflog{0};
     if (nflog.fetch_add(1) < 2) {
-        const char* env = (ch == cuphy_mq_channel::nai) ? CUPHY_NAI_MQ_ENABLE_ENV : CUPHY_RX_MQ_ENABLE_ENV;
-        std::fprintf(stderr, "cuphy_mq: %s ignored on non-Linux (POSIX mq export is Linux-only)\n", env);
+        const char* env = (ch == cuphy_mq_channel::nai) ? CUPHY_NAI_ZMQ_ENABLE_ENV : CUPHY_RX_ZMQ_ENABLE_ENV;
+        std::fprintf(stderr, "cuphy_zmq: %s ignored on non-Linux (ZeroMQ export is Linux-only)\n", env);
     }
     return;
 #else
@@ -716,8 +720,8 @@ void cuphy_mq_enqueue_from_device(cuphy_mq_channel ch,
         if (enlog.fetch_add(1) < 1) {
             const char* p = cuphy_mq_export::nai_mq_path();
             std::fprintf(stderr,
-                "cuphy_mq: %s=1 path=%s (resgrid IQ, same wire as RX)\n",
-                CUPHY_NAI_MQ_ENABLE_ENV,
+                "cuphy_zmq: %s=1 bind=%s\n",
+                CUPHY_NAI_ZMQ_ENABLE_ENV,
                 p ? p : "(unset)");
         }
         g_nai.enqueue(

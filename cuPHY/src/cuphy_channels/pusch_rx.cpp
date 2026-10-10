@@ -20,7 +20,7 @@
 #include "pusch_rx.hpp"
 #include "pusch_utils.hpp"
 #include "cuphy_api.h"
-#include "mq_sink.hpp"
+#include "zmq_sink.hpp"
 #include "nai_pdsch_recon.hpp"
 #include "util.hpp"
 #include "utils.cuh"
@@ -5398,7 +5398,7 @@ void PuschRx::copyNaiToMq(cudaStream_t cuStrm)
         if (s_skip.fetch_add(1) < 8) {
             NVLOGW_FMT(NVLOG_PUSCH,
                 "{}: NAI MQ export skipped — need embedded tail (naiTail={}) and full-slot CUDA graphs (cudaGraph={}); "
-                "set CUPHY_NAI_MQ_ENABLE=1 before start, fix NAI warmup if init failed, and ensure procMode includes full-slot graphs",
+                "set CUPHY_NAI_ZMQ_ENABLE=1 before start, fix NAI warmup if init failed, and ensure procMode includes full-slot graphs",
                 __FUNCTION__,
                 static_cast<int>(m_naiTailEmbeddedInFullSlotGraph),
                 static_cast<int>(m_cudaGraphModeEnabled));
