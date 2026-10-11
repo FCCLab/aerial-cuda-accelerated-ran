@@ -293,6 +293,7 @@ int main(int argc,char* argv[]) {
     ctx_cfg.debug_worker = parser_cfg.get_cuphydriver_debug_worker();
     ctx_cfg.data_core = parser_cfg.get_cuphydriver_data_core();
     ctx_cfg.datalake_db_write_enable = parser_cfg.get_cuphydriver_datalake_db_write_enable();
+    ctx_cfg.datalake_save_enable = parser_cfg.get_cuphydriver_datalake_save_enable();
     ctx_cfg.datalake_samples = parser_cfg.get_cuphydriver_datalake_samples();
     ctx_cfg.datalake_address = parser_cfg.get_cuphydriver_datalake_address();
     ctx_cfg.datalake_engine = parser_cfg.get_cuphydriver_datalake_engine();

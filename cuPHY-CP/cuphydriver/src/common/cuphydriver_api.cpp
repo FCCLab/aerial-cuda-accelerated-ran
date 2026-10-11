@@ -2205,6 +2205,24 @@ int l1_cell_update_cell_config(phydriver_handle pdh, uint16_t mplane_id, std::st
     return 0;
 }
 
+int l1_set_datalake_save(phydriver_handle pdh, uint8_t save_enable)
+{
+    try
+    {
+        PhyDriverCtx* pdctx = StaticConversion<PhyDriverCtx>(pdh).get();
+        DataLake* lake = pdctx->getDataLake();
+        if(lake == nullptr)
+        {
+            NVLOGW_FMT(TAG, "DataLake save ignored: data_core is not set, so the lake is not running");
+            return -1;
+        }
+        lake->setSaving(save_enable != 0);
+    }
+    PHYDRIVER_CATCH_EXCEPTIONS();
+
+    return 0;
+}
+
 int l1_cell_update_attenuation(phydriver_handle pdh, uint16_t mplane_id, float attenuation_dB)
 {
     try

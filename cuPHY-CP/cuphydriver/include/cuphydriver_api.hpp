@@ -340,6 +340,7 @@ struct context_config
     int16_t debug_worker;                                       ///< CPU core for debug worker thread (-1=disabled)
     int16_t data_core;                                          ///< CPU core for datalake thread (-1=disabled)
     uint8_t datalake_db_write_enable;                           ///< Enable database write operations for datalake (0=disabled, 1=enabled)
+    uint8_t datalake_save_enable;                               ///< Save slots into the datalake (0=skip, 1=save). Live via OAM; default 1.
     uint32_t datalake_samples;                                  ///< Number of samples to capture for datalake
     std::string datalake_address;                               ///< Datalake server address
     std::string datalake_engine;                                ///< Datalake engine type (e.g., "ClickHouse")
@@ -945,6 +946,16 @@ int l1_cell_update_cell_config(phydriver_handle pdh, uint16_t mplane_id, std::un
  * \p 0 on success, -1 otherwise
  */
 int l1_cell_update_attenuation(phydriver_handle pdh, uint16_t mplane_id, float attenuation_dB);
+
+/******************************************************************/ /**
+ * @brief Live datalake save gate
+ *
+ * The datalake thread itself follows data_core at startup. This flag decides
+ * whether notify() keeps the current slot. 1 saves, 0 skips.
+ *
+ * @return 0 on success, -1 if the datalake was not started
+ */
+int l1_set_datalake_save(phydriver_handle pdh, uint8_t save_enable);
 
 /******************************************************************/ /**
  * @brief Get live PRACH force_thr0 for a cell

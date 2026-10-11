@@ -44,6 +44,10 @@ static int oam_update_cell_attenuation(int32_t mplane_id, float attenuation_dB) 
     return PHYDriverProxy::getInstance().l1_cell_update_attenuation(mplane_id, attenuation_dB);
 }
 
+static int oam_set_datalake_save(int32_t save_enable) {
+    return PHYDriverProxy::getInstance().l1_set_datalake_save(save_enable != 0 ? 1 : 0);
+}
+
 int PHY_module::send_sfn_slot_sync_grpc_command()
 {
       int ret=0;  
@@ -473,6 +477,7 @@ PHY_module::PHY_module(yaml::node node_config) :
     stat_prm_idx_to_cell_id_map.clear();
 
     CuphyOAM::getInstance()->callback.update_cell_attenuation = oam_update_cell_attenuation;
+    CuphyOAM::getInstance()->callback.set_datalake_save = oam_set_datalake_save;
     TxNotificationHelper::setEnableTxNotification(PHYDriverProxy::getInstance().l1_get_dl_tx_notification());
 }
 

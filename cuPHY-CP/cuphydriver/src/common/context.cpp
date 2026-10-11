@@ -363,6 +363,7 @@ PhyDriverCtx::PhyDriverCtx(const context_config& ctx_cfg) :
             ctx_cfg.e3_pub_port,
             ctx_cfg.e3_sub_port,
             ctx_cfg.datalake_drop_tables));
+        dataLake->setSaving(ctx_cfg.datalake_save_enable != 0);
 
         std::thread t = std::thread(waitForLakeData, dataLake.get());
         datalake_thread.swap(t);

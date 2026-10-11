@@ -360,6 +360,7 @@ struct cuphydriver_config
     int16_t debug_worker;
     int16_t data_core;
     uint8_t datalake_db_write_enable;
+    uint8_t datalake_save_enable;
     uint32_t datalake_samples;
     std::string datalake_address;
     std::string datalake_engine;
@@ -516,6 +517,7 @@ public:
     uint8_t get_cuphydriver_datalake_drop_tables();
     uint8_t get_cuphydriver_datalake_store_failed_pdu();
     uint8_t get_cuphydriver_datalake_db_write_enable();
+    uint8_t get_cuphydriver_datalake_save_enable();
     std::vector<std::string>& get_cuphydriver_datalake_data_types();
     uint16_t& get_cuphydriver_slots();
     uint16_t& get_cuphydriver_section3_time_offset();

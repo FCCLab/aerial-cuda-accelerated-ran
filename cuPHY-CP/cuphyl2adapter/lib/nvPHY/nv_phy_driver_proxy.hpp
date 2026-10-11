@@ -159,6 +159,12 @@ public:
     int l1_cell_update_attenuation(uint16_t mplane_id, float attenuation_dB);
 
     /**
+     * @brief Live datalake save gate (1 = keep slots, 0 = skip)
+     * @return 0 on success, -1 if the datalake thread is not running
+     */
+    int l1_set_datalake_save(uint8_t save_enable);
+
+    /**
      * @brief Get live PRACH force_thr0 (0 = cuPHY default)
      */
     float l1_get_prach_force_thr0(uint16_t mplane_id);

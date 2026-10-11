@@ -261,6 +261,18 @@ int PHYDriverProxy::l1_cell_update_cell_config(uint16_t mplane_id, std::unordere
     }
 }
 
+int PHYDriverProxy::l1_set_datalake_save(uint8_t save_enable)
+{
+    if(driver_ != nullptr)
+    {
+        return ::l1_set_datalake_save(driver_, save_enable);
+    }
+    else
+    {
+        return -1;
+    }
+}
+
 int PHYDriverProxy::l1_cell_update_attenuation(uint16_t mplane_id, float attenuation_dB)
 {
     if(driver_ != nullptr)

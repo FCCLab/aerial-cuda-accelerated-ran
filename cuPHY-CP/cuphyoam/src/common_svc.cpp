@@ -154,9 +154,54 @@ grpc::Status CuphyCommonServiceImpl::GetFAPIStream(grpc::ServerContext* context,
     return grpc::Status::OK;
 }
 
+// datalake_save is a process-wide live gate, not a per-cell attribute.
+// Returns true when the request was handled (including failure).
+static bool handle_datalake_save(const aerial::CellParamUpdateRequest* request, grpc::Status* status, aerial::CellParamUpdateReply* reply)
+{
+    if (!request->multi_attrs_cfg() || request->attrs_size() != 1)
+    {
+        return false;
+    }
+    const auto it = request->attrs().find("datalake_save");
+    if (it == request->attrs().end())
+    {
+        return false;
+    }
+
+    CuphyOAM* oam = CuphyOAM::getInstance();
+    if (oam->callback.set_datalake_save == nullptr)
+    {
+        *status = grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
+            "L1 has no datalake save hook; rebuild cuphycontroller");
+        return true;
+    }
+
+    const int save_enable = it->second != 0.0 ? 1 : 0;
+    if (oam->callback.set_datalake_save(save_enable) != 0)
+    {
+        *status = grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
+            "datalake is not running; set data_config.data_core and restart cuphycontroller");
+        return true;
+    }
+
+    if (reply != nullptr)
+    {
+        reply->mutable_resp()->set_status_code(aerial::Status::OK);
+    }
+    NVLOGC_FMT(TAG, "DataLake save {}", save_enable ? "on" : "off");
+    *status = grpc::Status::OK;
+    return true;
+}
+
 grpc::Status CuphyCommonServiceImpl::UpdateCellParamsSyncCall(grpc::ServerContext* context, const aerial::CellParamUpdateRequest* request,
                   aerial::CellParamUpdateReply* reply)
 {
+    grpc::Status save_status = grpc::Status::OK;
+    if (handle_datalake_save(request, &save_status, reply))
+    {
+        return save_status;
+    }
+
     CuphyOAM* oam = CuphyOAM::getInstance();
 
     // For update attenuation, update and return immediately (synchronous call).
@@ -246,6 +291,12 @@ grpc::Status CuphyCommonServiceImpl::UpdateCellParamsSyncCall(grpc::ServerContex
 grpc::Status CuphyCommonServiceImpl::UpdateCellParams(grpc::ServerContext* context, const aerial::CellParamUpdateRequest* request,
                   aerial::DummyReply* reply)
 {
+    grpc::Status save_status = grpc::Status::OK;
+    if (handle_datalake_save(request, &save_status, nullptr))
+    {
+        return save_status;
+    }
+
     CuphyOAM* oam = CuphyOAM::getInstance();
 
     // For update attenuation, update and return immediately (synchronous call).

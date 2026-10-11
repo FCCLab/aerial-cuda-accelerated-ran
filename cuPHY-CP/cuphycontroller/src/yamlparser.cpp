@@ -1672,6 +1672,14 @@ int YamlParser::parse_cuphydriver_configs(yaml::node root)
             } else {
                 phydriver_config.datalake_db_write_enable = 0;
             }
+
+            // Live save gate. Default on once the lake is configured.
+            // PHY control can flip this without a restart.
+            if(data_cfg.has_key("datalake_save_enable")) {
+                phydriver_config.datalake_save_enable = data_cfg["datalake_save_enable"].as<uint8_t>();
+            } else {
+                phydriver_config.datalake_save_enable = 1;
+            }
             
             if(data_cfg.has_key("datalake_samples")) {
                 phydriver_config.datalake_samples = data_cfg["datalake_samples"].as<uint32_t>();
@@ -1761,6 +1769,7 @@ int YamlParser::parse_cuphydriver_configs(yaml::node root)
             NVLOGI_FMT(TAG," Using default values for data_config");
             phydriver_config.data_core = -1;
             phydriver_config.datalake_db_write_enable = 0;
+            phydriver_config.datalake_save_enable = 1;
             phydriver_config.datalake_samples = 1000000;
             phydriver_config.datalake_address = "localhost";
             phydriver_config.datalake_engine = "Memory";
@@ -2181,6 +2190,9 @@ int16_t YamlParser::get_cuphydriver_data_core() {
 }
 uint8_t YamlParser::get_cuphydriver_datalake_db_write_enable() {
     return phydriver_config.datalake_db_write_enable;
+}
+uint8_t YamlParser::get_cuphydriver_datalake_save_enable() {
+    return phydriver_config.datalake_save_enable;
 }
 std::vector<std::string>& YamlParser::get_cuphydriver_datalake_data_types() {
     return phydriver_config.datalake_data_types;

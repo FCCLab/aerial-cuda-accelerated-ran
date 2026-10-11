@@ -393,11 +393,23 @@ inline uint64_t sfn_to_tai(int sfn, int slot, uint64_t approx_tai_time_ns, int64
 	return base_tai_time_ns + sfn * FRAME_PERIOD_NS + slot * slot_period_ns[mu];
 }
 
+void DataLake::setSaving(bool enabled) {
+	const bool previous = saveEnabled.exchange(enabled, std::memory_order_relaxed);
+	if (previous != enabled) {
+		NVLOGC_FMT(TAG_DATALAKE, "DataLake save {}", enabled ? "on" : "off");
+	}
+}
+
 void DataLake::notify(uint32_t nCrc,
 	const slot_command_api::slot_indication* slot,
 	const slot_command_api::pusch_params* params,
 	::cuphyPuschDataOut_t const* out, ::cuphyPuschStatPrms_t const* puschStatPrms)
 {
+	// Single decision point: config brought the lake up; this flag decides
+	// whether the slot is captured and later written.
+	if (!saveEnabled.load(std::memory_order_relaxed)) {
+		return;
+	}
 	NVLOGD_FMT(TAG_DATALAKE, "TIMESTAMP_LOG: DataLake notify (Op #2) for {:4}.{:02} entry at {}", slot->sfn_, slot->slot_, std::chrono::high_resolution_clock::now().time_since_epoch().count());
 	// When we have one cell this will always be true, when we have two cells using one as a dummy this will be
 	// true only when the "real" cell has PUSCH in it.

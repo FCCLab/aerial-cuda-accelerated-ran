@@ -380,6 +380,11 @@ class DataLake {
 		const slot_command_api::pusch_params* params,
 		::cuphyPuschDataOut_t const* out, ::cuphyPuschStatPrms_t const* puschStatPrms);
 
+	// Runtime save gate. The lake thread and capture buffers stay up (config
+	// enables those). This flag is what decides whether a slot is kept.
+	void setSaving(bool enabled);
+	bool saving() const { return saveEnabled.load(std::memory_order_relaxed); }
+
 	void insertPusch(puschInfo_t* puschInfo);
 	void insertFh(fhInfo_t* fhInfo);
 	void insertHest(hestInfo_t* hestInfo);
@@ -406,6 +411,8 @@ class DataLake {
 		
 	private:
 		int numSamples_;
+		// Default on: config already decided the lake is running.
+		std::atomic<bool> saveEnabled{true};
 		bool debug = false;
 		bool flushColumns = false;
 		const bool dropTables = false;

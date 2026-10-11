@@ -177,6 +177,7 @@ cuphydriver_config:
 
   # data_config:
     # data_core: 12               # This must be set for Data Lake and/or E3 Agent to be used
+    # datalake_save_enable: 1     # Save slots (default 1). PHY control flips this live; no L1 restart
     # datalake_db_write_enable: 1   # Enable/disable ClickHouse writes based on datalake_data_types
     # datalake_samples: 1000000
     # datalake_address: localhost

@@ -121,6 +121,8 @@ typedef struct
 {
     // De-initiate and destroy the nv_ipc_t instance
     int (*update_cell_attenuation)(int32_t mplane_id, float attenuation_db);
+    // 1 = save slots, 0 = skip. Returns 0, or -1 if the datalake is not running.
+    int (*set_datalake_save)(int32_t save_enable);
     void (*cell_multi_attr_update)(uint16_t mplane_id, std::unordered_map<std::string, double>& attrs);
 
 } CuphyOAMCallback;
@@ -209,6 +211,7 @@ class CuphyOAM
             ul_u_plane_drop_requests = nullptr;
             zero_ul_u_plane_requests = nullptr;
             callback.update_cell_attenuation = nullptr;
+            callback.set_datalake_save = nullptr;
         };
 
         virtual ~CuphyOAM() {};
